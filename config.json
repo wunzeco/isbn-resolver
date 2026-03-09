@@ -1,0 +1,6 @@
+{
+  "workers": 5,
+  "timeout": "30s",
+  "format": "json",
+  "verbose": false
+}

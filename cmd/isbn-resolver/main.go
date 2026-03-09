@@ -6,23 +6,22 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
+	"time"
 
 	"github.com/wunzeco/isbn-resolver/pkg/config"
 	"github.com/wunzeco/isbn-resolver/pkg/isbn"
 	"github.com/wunzeco/isbn-resolver/pkg/output"
 	"github.com/wunzeco/isbn-resolver/pkg/resolver"
 	"github.com/wunzeco/isbn-resolver/pkg/sheets"
-	"github.com/wunzeco/isbn-resolver/pkg/worker"
 )
 
 func main() {
 	cfg := config.DefaultConfig()
 
 	// Define command-line flags
-	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "Number of concurrent workers")
-	flag.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "API request timeout")
+	timeoutDuration := time.Duration(cfg.Timeout)
+	flag.DurationVar(&timeoutDuration, "timeout", timeoutDuration, "API request timeout")
 	flag.StringVar(&cfg.InputFile, "file", "", "Input file containing ISBNs (one per line)")
 	formatStr := flag.String("format", "text", "Output format: text, json, csv")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose output")
@@ -38,6 +37,9 @@ func main() {
 	flag.BoolVar(&cfg.SheetsDryRun, "sheets-dry-run", false, "Preview changes without writing")
 
 	flag.Parse()
+
+	// Store timeout back to config
+	cfg.Timeout = config.Duration(timeoutDuration)
 
 	// Load configuration from file if specified
 	if cfg.ConfigFile != "" {
@@ -86,42 +88,32 @@ func main() {
 	}
 
 	if cfg.Verbose {
-		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s) with %d workers...\n", len(validISBNs), cfg.Workers)
+		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s)...\n", len(validISBNs))
 	}
 
-	// Create API client and worker pool
-	client := resolver.NewAPIClient(cfg.Timeout)
-	pool := worker.NewPool(cfg.Workers, client)
+	// Create API client
+	client := resolver.NewAPIClient(time.Duration(cfg.Timeout))
 
-	// Submit jobs
-	for i, isbnStr := range validISBNs {
-		pool.Submit(worker.Job{
-			ISBN:  isbnStr,
-			Index: i,
-		})
-	}
-
-	// Collect results
+	// Process ISBNs sequentially
 	results := make([]resolver.BookMetadata, len(validISBNs))
 	errors := make(map[string]error)
 
-	go func() {
-		pool.Close()
-	}()
-
-	for result := range pool.Results() {
-		if result.Error != nil {
-			errors[result.Metadata.ISBN] = result.Error
-			results[result.Index] = resolver.BookMetadata{ISBN: result.Metadata.ISBN}
+	for i, isbnStr := range validISBNs {
+		metadata, err := client.Resolve(isbnStr)
+		if err != nil {
+			errors[isbnStr] = err
+			results[i] = resolver.BookMetadata{ISBN: isbnStr}
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "Failed to resolve ISBN %s: %v\n", isbnStr, err)
+			}
 		} else {
-			results[result.Index] = *result.Metadata
+			metadata.ISBN = isbnStr
+			results[i] = *metadata
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "✓ Resolved ISBN %s: %s\n", isbnStr, metadata.Title)
+			}
 		}
 	}
-
-	// Sort results by original order
-	sort.Slice(results, func(i, j int) bool {
-		return i < j
-	})
 
 	// Write to Google Sheets if configured
 	if cfg.SheetsURL != "" || cfg.SheetsID != "" {

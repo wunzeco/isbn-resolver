@@ -14,12 +14,12 @@ func TestFormatText(t *testing.T) {
 
 	metadata := &resolver.BookMetadata{
 		ISBN:            "9780134190440",
+		ISBN13:          "978-0134190440",
 		Title:           "The Go Programming Language",
 		Authors:         []string{"Alan A. A. Donovan", "Brian W. Kernighan"},
 		Publisher:       "Addison-Wesley",
 		PublicationDate: "2015-11-16",
 		Pages:           400,
-		Language:        "English",
 		Categories:      []string{"Programming", "Computer Science"},
 	}
 
@@ -33,11 +33,11 @@ func TestFormatText(t *testing.T) {
 	// Check that key fields are present
 	requiredFields := []string{
 		"ISBN: 9780134190440",
+		"ISBN-13: 978-0134190440",
 		"Title: The Go Programming Language",
 		"Authors: Alan A. A. Donovan, Brian W. Kernighan",
 		"Publisher: Addison-Wesley",
 		"Pages: 400",
-		"Language: English",
 		"Categories: Programming, Computer Science",
 		"Status: ✓ Resolved",
 	}

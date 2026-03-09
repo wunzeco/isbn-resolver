@@ -18,7 +18,6 @@ type BookMetadata struct {
 	Publisher       string   `json:"publisher"`
 	PublicationDate string   `json:"publication_date"`
 	Pages           int      `json:"pages"`
-	Language        string   `json:"language"`
 	Categories      []string `json:"categories"`
 	Error           string   `json:"error,omitempty"`
 }
@@ -186,7 +185,6 @@ func (c *APIClient) fetchFromGoogleBooks(isbn string) (*BookMetadata, error) {
 		Publisher:       volumeInfo.Publisher,
 		PublicationDate: volumeInfo.PublishedDate,
 		Pages:           volumeInfo.PageCount,
-		Language:        volumeInfo.Language,
 		Categories:      volumeInfo.Categories,
 	}
 

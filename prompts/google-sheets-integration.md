@@ -10,7 +10,6 @@ The ISBN resolver tool currently supports:
 - Reading ISBNs from command-line arguments, files, and stdin
 - Validating ISBN-10 and ISBN-13 formats
 - Resolving book metadata via Open Library and Google Books APIs
-- Concurrent processing with worker pools
 - Output in text, JSON, and CSV formats
 
 ## Requirements
@@ -96,14 +95,14 @@ The ISBN resolver tool currently supports:
 | Column | Field |
 |--------|-------|
 | A | ISBN (original input) |
-| B | Status (Success/Error) |
+| B | ISBN-13 |
 | C | Title |
 | D | Authors |
 | E | Publisher |
 | F | Publication Date |
 | G | Pages |
-| H | Language |
-| I | Categories |
+| H | Categories |
+| I | Status (Success/Error) |
 | J | Error Message (if failed) |
 
 **Customizable Output:**
@@ -178,7 +177,6 @@ isbn-resolver --sheets-url "URL" --sheets-range "A2:A"
 4. **Phase 4: Integration**
    - Integrate with existing CLI flags and config
    - Update main.go to support sheets input
-   - Combine with existing worker pool for concurrent processing
    - Add progress reporting for large sheets
 
 5. **Phase 5: Testing & Documentation**
@@ -191,7 +189,6 @@ isbn-resolver --sheets-url "URL" --sheets-range "A2:A"
 
 ```json
 {
-  "workers": 5,
   "timeout": "30s",
   "format": "json",
   "verbose": true,
@@ -200,14 +197,14 @@ isbn-resolver --sheets-url "URL" --sheets-range "A2:A"
     "default_input_range": "A2:A",
     "column_mapping": {
       "isbn": "A",
-      "status": "B",
+      "isbn_13": "B",
       "title": "C",
       "authors": "D",
       "publisher": "E",
       "publication_date": "F",
       "pages": "G",
-      "language": "H",
-      "categories": "I",
+      "categories": "H",
+      "status": "I",
       "error": "J"
     },
     "batch_size": 100,
@@ -245,7 +242,7 @@ Authenticating with Google Sheets...
 ✓ Successfully authenticated
 Reading ISBNs from sheet "Book List" (range: A2:A50)...
 Found 48 ISBNs to process
-Processing 48 ISBNs with 5 workers...
+Processing 48 ISBNs...
 [█████████████████████████████] 48/48 (100%)
 Writing results to sheet "Book List" (range: B2:J49)...
 ✓ Successfully wrote 45 results
@@ -260,11 +257,11 @@ Summary:
 
 ### Google Sheets Output
 
-| ISBN | Status | Title | Authors | Publisher | Publication Date | Pages | Language | Categories | Error |
-|------|--------|-------|---------|-----------|------------------|-------|----------|------------|-------|
-| 978-0134190440 | Success | The Go Programming Language | Alan A. A. Donovan, Brian W. Kernighan | Addison-Wesley | 2015-11-16 | 400 | English | Programming, Computer Science | |
-| 0596520689 | Success | Programming Perl | Larry Wall, Tom Christiansen | O'Reilly Media | 2000-07-14 | 1092 | English | Programming | |
-| 1234567890 | Error | | | | | | | | ISBN not found in database |
+| ISBN | ISBN-13 | Title | Authors | Publisher | Publication Date | Pages | Categories | Status | Error |
+|------|---------|-------|---------|-----------|------------------|-------|------------|--------|-------|
+| 978-0134190440 | 978-0134190440 | The Go Programming Language | Alan A. A. Donovan, Brian W. Kernighan | Addison-Wesley | 2015-11-16 | 400 | Programming, Computer Science | Success | |
+| 0596520689 | 978-0596520687 | Programming Perl | Larry Wall, Tom Christiansen | O'Reilly Media | 2000-07-14 | 1092 | Programming | Success | |
+| 1234567890 | | | | | | | | Error | ISBN not found in database |
 
 ## Error Handling Examples
 

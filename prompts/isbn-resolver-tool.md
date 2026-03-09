@@ -32,12 +32,12 @@ Build a command-line tool in Golang that takes a list of ISBN (International Sta
 
 4. **Output Format**
    - Display the following information for each ISBN:
+     - ISBN-13
      - Title
      - Author(s)
      - Publisher
      - Publication date
      - Number of pages
-     - Language
      - Categories
    - Support multiple output formats:
      - Human-readable text
@@ -53,12 +53,7 @@ Build a command-line tool in Golang that takes a list of ISBN (International Sta
    - Include proper error handling
    - Ensure that the go package is under `github.com/wunzeco/isbn-resolver`
 
-2. **Concurrency**
-   - Process multiple ISBNs concurrently using goroutines
-   - Implement a worker pool pattern to limit concurrent API requests
-   - Use channels for communication between goroutines
-
-3. **Configuration**
+2. **Configuration**
    - Support configuration via:
      - Command-line flags
      - Environment variables
@@ -67,16 +62,15 @@ Build a command-line tool in Golang that takes a list of ISBN (International Sta
      - API endpoint(s)
      - API keys (if required)
      - Timeout values
-     - Number of concurrent workers
      - Output format
 
-4. **Error Handling**
+3. **Error Handling**
    - Gracefully handle network errors
    - Continue processing remaining ISBNs if one fails
    - Provide summary of successful and failed lookups
    - Include verbose/debug mode for troubleshooting
 
-5. **Dependencies**
+4. **Dependencies**
    - Minimize external dependencies
    - Use standard library where possible
    - Recommended packages:
@@ -124,9 +118,6 @@ isbn-resolver --file isbns.txt
 # From stdin with JSON output
 cat isbns.txt | isbn-resolver --format json
 
-# With custom worker count
-isbn-resolver --workers 5 --file isbns.txt
-
 # Verbose mode
 isbn-resolver --verbose --file isbns.txt
 ```
@@ -141,7 +132,6 @@ Authors: Alan A. A. Donovan, Brian W. Kernighan
 Publisher: Addison-Wesley Professional
 Publication Date: 2015-11-16
 Pages: 400
-Language: English
 Status: ✓ Resolved
 
 ---
@@ -163,8 +153,7 @@ Status: ✗ Failed - Invalid ISBN or not found in database
         "authors": ["Alan A. A. Donovan", "Brian W. Kernighan"],
         "publisher": "Addison-Wesley Professional",
         "publication_date": "2015-11-16",
-        "pages": 400,
-        "language": "English"
+        "pages": 400
       }
     },
     {
@@ -184,11 +173,10 @@ Status: ✗ Failed - Invalid ISBN or not found in database
 ## Implementation Guidelines
 
 1. Start with a minimal working version that validates ISBNs and queries a single API
-2. Add concurrency support for processing multiple ISBNs
-3. Implement multiple output formats
-4. Add configuration options and error handling
-5. Include tests and documentation
-6. Consider optional enhancements based on use case
+2. Implement multiple output formats
+3. Add configuration options and error handling
+4. Include tests and documentation
+5. Consider optional enhancements based on use case
 
 ## Deliverables
 

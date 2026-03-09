@@ -152,7 +152,6 @@ isbn-resolver --sheets-url "URL" \
 ```bash
 isbn-resolver --sheets-url "URL" \
               --sheets-range "A2:A" \
-              --workers 10 \
               --timeout 60s \
               --verbose
 ```
@@ -218,7 +217,6 @@ Solutions:
 **Error: "Google Sheets API rate limit reached"**
 
 Solutions:
-- Reduce the number of concurrent workers: `--workers 3`
 - Process in smaller batches
 - Wait a few minutes and retry
 - Check [Google's quota limits](https://developers.google.com/sheets/api/limits)
@@ -256,7 +254,6 @@ The tool automatically:
 
 For large datasets (1000+ ISBNs):
 - Consider breaking into smaller batches
-- Use `--workers 3` to reduce concurrent operations
 - Process during off-peak hours
 
 ## Security Best Practices
@@ -304,7 +301,6 @@ Create a config file with Google Sheets settings:
 
 ```json
 {
-  "workers": 5,
   "timeout": "30s",
   "verbose": true,
   "sheets_url": "https://docs.google.com/spreadsheets/d/YOUR_ID/edit",

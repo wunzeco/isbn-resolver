@@ -68,7 +68,7 @@ func (c *Client) WriteResults(config WriteConfig, results []resolver.BookMetadat
 func (c *Client) formatResultsForSheet(results []resolver.BookMetadata, errors map[string]error) [][]interface{} {
 	// Header row
 	values := [][]interface{}{
-		{"Status", "Title", "Authors", "Publisher", "Publication Date", "Pages", "Language", "Categories", "Error"},
+		{"ISBN-13", "Title", "Authors", "Publisher", "Publication Date", "Pages", "Categories", "Status", "Error"},
 	}
 
 	// Data rows
@@ -86,15 +86,21 @@ func (c *Client) formatResultsForSheet(results []resolver.BookMetadata, errors m
 			pages = fmt.Sprintf("%d", metadata.Pages)
 		}
 
+		// Use ISBN-13 if available, otherwise use the original ISBN
+		isbn13 := metadata.ISBN13
+		if isbn13 == "" {
+			isbn13 = metadata.ISBN
+		}
+
 		row := []interface{}{
-			status,
+			isbn13,
 			metadata.Title,
 			strings.Join(metadata.Authors, ", "),
 			metadata.Publisher,
 			metadata.PublicationDate,
 			pages,
-			metadata.Language,
 			strings.Join(metadata.Categories, ", "),
+			status,
 			errorMsg,
 		}
 

@@ -2,16 +2,49 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/wunzeco/isbn-resolver/pkg/output"
 )
 
+// Duration is a custom type that handles JSON unmarshaling of duration strings
+type Duration time.Duration
+
+// UnmarshalJSON implements json.Unmarshaler interface
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var v interface{}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+
+	switch value := v.(type) {
+	case string:
+		// Parse string as duration (e.g., "30s", "1m", "1h30m")
+		dur, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration format: %w", err)
+		}
+		*d = Duration(dur)
+		return nil
+	case float64:
+		// Handle numeric value as nanoseconds
+		*d = Duration(time.Duration(value))
+		return nil
+	default:
+		return fmt.Errorf("invalid duration type: %T", value)
+	}
+}
+
+// MarshalJSON implements json.Marshaler interface
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
 // Config holds the application configuration
 type Config struct {
-	Workers    int           `json:"workers"`
-	Timeout    time.Duration `json:"timeout"`
+	Timeout    Duration      `json:"timeout"`
 	Format     output.Format `json:"format"`
 	Verbose    bool          `json:"verbose"`
 	InputFile  string        `json:"input_file"`
@@ -30,8 +63,7 @@ type Config struct {
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Workers: 5,
-		Timeout: 30 * time.Second,
+		Timeout: Duration(30 * time.Second),
 		Format:  output.FormatText,
 		Verbose: false,
 	}
@@ -55,13 +87,9 @@ func LoadFromFile(filename string) (*Config, error) {
 
 // LoadFromEnv loads configuration from environment variables
 func (c *Config) LoadFromEnv() {
-	if workers := os.Getenv("ISBN_WORKERS"); workers != "" {
-		// Parse and set workers if valid
-	}
-
 	if timeout := os.Getenv("ISBN_TIMEOUT"); timeout != "" {
 		if d, err := time.ParseDuration(timeout); err == nil {
-			c.Timeout = d
+			c.Timeout = Duration(d)
 		}
 	}
 

@@ -5,8 +5,7 @@ A high-performance command-line tool written in Go that resolves ISBN numbers to
 ## Features
 
 - ✅ **ISBN Validation**: Validates both ISBN-10 and ISBN-13 formats with checksum verification
-- 🚀 **Concurrent Processing**: Uses worker pools with goroutines for efficient parallel processing
-- 🔄 **Multiple Input Methods**: Accepts ISBNs via command-line arguments, files, stdin, or Google Sheets
+-  **Multiple Input Methods**: Accepts ISBNs via command-line arguments, files, stdin, or Google Sheets
 - 📊 **Multiple Output Formats**: Supports text, JSON, and CSV output formats
 - 📋 **Google Sheets Integration**: Read ISBNs from and write results to Google Sheets
 - 🌐 **API Fallback**: Queries multiple APIs (Open Library, Google Books) with automatic fallback
@@ -124,9 +123,6 @@ isbn-resolver --format csv --file isbns.txt > output.csv
 ### Advanced Options
 
 ```bash
-# Custom number of workers
-isbn-resolver --workers 10 --file isbns.txt
-
 # Custom timeout
 isbn-resolver --timeout 60s 978-0134190440
 
@@ -164,10 +160,9 @@ isbn-resolver --sheets-url "URL" \
               --sheets-range "A2:A" \
               --sheets-dry-run
 
-# With custom worker count and verbose output
+# With verbose output
 isbn-resolver --sheets-url "URL" \
               --sheets-range "A2:A" \
-              --workers 10 \
               --verbose
 ```
 
@@ -179,7 +174,6 @@ See [GOOGLE_SHEETS.md](GOOGLE_SHEETS.md) for detailed setup instructions.
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--workers` | Number of concurrent workers | 5 |
 | `--timeout` | API request timeout | 30s |
 | `--file` | Input file with ISBNs | - |
 | `--format` | Output format (text, json, csv) | text |
@@ -197,7 +191,6 @@ See [GOOGLE_SHEETS.md](GOOGLE_SHEETS.md) for detailed setup instructions.
 
 | Variable | Description |
 |----------|-------------|
-| `ISBN_WORKERS` | Number of concurrent workers |
 | `ISBN_TIMEOUT` | API request timeout |
 | `ISBN_FORMAT` | Output format |
 | `ISBN_VERBOSE` | Enable verbose mode (true/false) |
@@ -210,7 +203,6 @@ Create a JSON configuration file:
 
 ```json
 {
-  "workers": 5,
   "timeout": "30s",
   "format": "json",
   "verbose": false
@@ -235,8 +227,6 @@ isbn-resolver/
 │   │   └── validator_test.go # ISBN validation tests
 │   ├── resolver/
 │   │   └── client.go         # API client for book metadata
-│   ├── worker/
-│   │   └── pool.go           # Worker pool for concurrency
 │   ├── output/
 │   │   ├── formatter.go      # Output formatting logic
 │   │   └── formatter_test.go # Formatter tests
@@ -314,15 +304,13 @@ If an ISBN returns no results:
 
 If you're experiencing timeouts:
 - Increase the timeout: `--timeout 60s`
-- Reduce the number of workers: `--workers 3`
 - Check your internet connection
 - Try again later (API might be experiencing high load)
 
 ### Rate Limiting
 
 If you're processing many ISBNs:
-- Reduce concurrent workers: `--workers 2`
-- Add delays between batches
+- Add delays between requests
 - Consider implementing caching for frequently queried ISBNs
 
 ## Contributing

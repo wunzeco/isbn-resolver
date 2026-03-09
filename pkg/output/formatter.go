@@ -59,6 +59,10 @@ func (f *Formatter) formatText(metadata *resolver.BookMetadata, err error) error
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("ISBN: %s\n", metadata.ISBN))
 	
+	if metadata.ISBN13 != "" {
+		sb.WriteString(fmt.Sprintf("ISBN-13: %s\n", metadata.ISBN13))
+	}
+	
 	if metadata.Title != "" {
 		sb.WriteString(fmt.Sprintf("Title: %s\n", metadata.Title))
 	}
@@ -77,10 +81,6 @@ func (f *Formatter) formatText(metadata *resolver.BookMetadata, err error) error
 	
 	if metadata.Pages > 0 {
 		sb.WriteString(fmt.Sprintf("Pages: %d\n", metadata.Pages))
-	}
-	
-	if metadata.Language != "" {
-		sb.WriteString(fmt.Sprintf("Language: %s\n", metadata.Language))
 	}
 	
 	if len(metadata.Categories) > 0 {
@@ -156,14 +156,14 @@ func (f *Formatter) formatCSV(results []resolver.BookMetadata, errors map[string
 	// Write header
 	header := []string{
 		"ISBN",
-		"Status",
+		"ISBN-13",
 		"Title",
 		"Authors",
 		"Publisher",
 		"Publication Date",
 		"Pages",
-		"Language",
 		"Categories",
+		"Status",
 		"Error",
 	}
 	if err := writer.Write(header); err != nil {
@@ -185,16 +185,22 @@ func (f *Formatter) formatCSV(results []resolver.BookMetadata, errors map[string
 			pages = fmt.Sprintf("%d", metadata.Pages)
 		}
 
+		// Use ISBN-13 if available, otherwise use the original ISBN
+		isbn13 := metadata.ISBN13
+		if isbn13 == "" {
+			isbn13 = metadata.ISBN
+		}
+
 		row := []string{
 			metadata.ISBN,
-			status,
+			isbn13,
 			metadata.Title,
 			strings.Join(metadata.Authors, "; "),
 			metadata.Publisher,
 			metadata.PublicationDate,
 			pages,
-			metadata.Language,
 			strings.Join(metadata.Categories, "; "),
+			status,
 			errorMsg,
 		}
 
