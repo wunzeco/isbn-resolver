@@ -33,3 +33,8 @@ go.work.sum
 
 .creds/
 .tmp/
+IMPLEMENTATION_PLAN.md
+PROGRESS.md
+.ralph/
+PROMPT_plan.md
+PROMPT_build.md
