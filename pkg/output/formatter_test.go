@@ -2,6 +2,9 @@ package output
 
 import (
 	"bytes"
+	"encoding/csv"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -85,6 +88,10 @@ func TestFormatJSON(t *testing.T) {
 	}
 }
 
+// TestFormatCSV pins the full 10-column CSV schema. Downstream consumers
+// (spreadsheets, the Sheets writer) depend on both the column set and its
+// order, so the whole record is compared rather than a substring: a reordered
+// or dropped column must fail here.
 func TestFormatCSV(t *testing.T) {
 	buf := &bytes.Buffer{}
 	formatter := NewFormatter(FormatCSV, buf)
@@ -96,24 +103,41 @@ func TestFormatCSV(t *testing.T) {
 			Authors: []string{"Alan A. A. Donovan", "Brian W. Kernighan"},
 			Pages:   400,
 		},
+		{
+			ISBN: "9780000000000",
+		},
 	}
 
-	errors := make(map[string]error)
+	// Keyed by ISBN: an entry here flips the row's Status column to "error"
+	// and populates the trailing Error column.
+	errors := map[string]error{
+		"9780000000000": fmt.Errorf("not found in any source"),
+	}
 
-	err := formatter.FormatBatch(results, errors)
-	if err != nil {
+	if err := formatter.FormatBatch(results, errors); err != nil {
 		t.Fatalf("FormatBatch failed: %v", err)
 	}
 
-	output := buf.String()
-	
-	// Check CSV header
-	if !strings.Contains(output, "ISBN,Status,Title") {
-		t.Error("CSV output missing header")
+	records, err := csv.NewReader(buf).ReadAll()
+	if err != nil {
+		t.Fatalf("output is not valid CSV: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("expected header + 2 rows, got %d records: %v", len(records), records)
 	}
 
-	// Check data row
-	if !strings.Contains(output, "9780134190440,success,The Go Programming Language") {
-		t.Error("CSV output missing data row")
+	want := [][]string{
+		{"ISBN", "ISBN-13", "Title", "Authors", "Publisher", "Publication Date", "Pages", "Categories", "Status", "Error"},
+		// ISBN13 is empty on the input, so the ISBN-13 column falls back to ISBN.
+		// Multi-valued fields are joined with "; " to stay comma-safe.
+		{"9780134190440", "9780134190440", "The Go Programming Language", "Alan A. A. Donovan; Brian W. Kernighan", "", "", "400", "", "success", ""},
+		// Pages 0 renders as empty rather than "0" so unknown page counts are distinguishable.
+		{"9780000000000", "9780000000000", "", "", "", "", "", "", "error", "not found in any source"},
+	}
+
+	for i, wantRecord := range want {
+		if !reflect.DeepEqual(records[i], wantRecord) {
+			t.Errorf("record %d mismatch:\n got: %q\nwant: %q", i, records[i], wantRecord)
+		}
 	}
 }
