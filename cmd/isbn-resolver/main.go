@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -72,27 +73,38 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s)...\n", len(validISBNs))
 	}
 
+	// Load the cache before any network work. A corrupt cache file is fatal
+	// rather than a warning: starting from empty would silently re-resolve
+	// everything and then overwrite the file the user still has a chance to
+	// repair.
+	bookCache := cache.New()
+	if cacheMode.Persists() {
+		loaded, err := cache.Load(cfg.CacheFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		bookCache = loaded
+	}
+
 	// Create API client
 	client := resolver.NewAPIClient(time.Duration(cfg.Timeout))
 
-	// Process ISBNs sequentially
-	results := make([]resolver.BookMetadata, len(validISBNs))
-	errors := make(map[string]error)
+	progress := io.Discard
+	if cfg.Verbose {
+		progress = os.Stderr
+	}
 
-	for i, isbnStr := range validISBNs {
-		metadata, err := client.Resolve(isbnStr)
-		if err != nil {
-			errors[isbnStr] = err
-			results[i] = resolver.BookMetadata{ISBN: isbnStr}
-			if cfg.Verbose {
-				fmt.Fprintf(os.Stderr, "Failed to resolve ISBN %s: %v\n", isbnStr, err)
-			}
-		} else {
-			metadata.ISBN = isbnStr
-			results[i] = *metadata
-			if cfg.Verbose {
-				fmt.Fprintf(os.Stderr, "✓ Resolved ISBN %s: %s\n", isbnStr, metadata.Title)
-			}
+	// Process ISBNs sequentially — the worker pool lands separately.
+	results, errors := resolveISBNs(validISBNs, client, bookCache, cache.NewPolicy(bookCache, cacheMode), progress)
+
+	// Write through before producing any output, so the cache is up to date
+	// even on the Google Sheets path (which returns early) and so a failure to
+	// write is reported before the results scroll past. A save failure is not
+	// fatal: the results in hand are still correct and worth emitting.
+	if cacheMode.Persists() {
+		if err := bookCache.Save(cfg.CacheFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save cache: %v\n", err)
 		}
 	}
 
@@ -295,6 +307,93 @@ func resolveCacheMode(cfg *config.Config) (cache.Mode, error) {
 	default:
 		return cache.ModeNormal, nil
 	}
+}
+
+// bookResolver is the slice of resolver.APIClient the resolve loop needs. It
+// exists so the loop can be tested against a fake that counts calls — the point
+// of the cache is the calls it does *not* make, which is only observable from
+// the resolver's side.
+type bookResolver interface {
+	Resolve(isbn string) (*resolver.BookMetadata, error)
+}
+
+// resolveISBNs resolves each ISBN in order, consulting the cache first.
+//
+// The cache is read through rather than around: a policy hit fills the output
+// slot straight from the cached entry with no network call, and every attempt
+// that *is* made is recorded back into store immediately. Recording as we go
+// (rather than collecting and writing once at the end) means a repeated ISBN
+// within a single input list also costs one call, and a run interrupted before
+// the final Save has still populated the in-memory cache consistently.
+//
+// Cached failures are replayed as errors, not as empty successes, so a cache
+// hit and a fresh resolution produce byte-identical output for the same ISBN.
+func resolveISBNs(isbns []string, client bookResolver, store *cache.Cache, policy *cache.Policy, progress io.Writer) ([]resolver.BookMetadata, map[string]error) {
+	results := make([]resolver.BookMetadata, len(isbns))
+	failures := make(map[string]error)
+
+	for i, isbnStr := range isbns {
+		key := cache.Key(isbnStr)
+
+		if entry, reuse := policy.Lookup(key); reuse {
+			results[i] = cachedMetadata(entry, isbnStr)
+			if entry.Status == cache.StatusError {
+				failures[isbnStr] = cachedError(entry)
+			}
+			continue
+		}
+
+		metadata, err := client.Resolve(isbnStr)
+		attempted := time.Now().UTC()
+
+		if err != nil {
+			failures[isbnStr] = err
+			results[i] = resolver.BookMetadata{ISBN: isbnStr}
+			store.Set(key, cache.Entry{
+				Status:      cache.StatusError,
+				Error:       err.Error(),
+				LastAttempt: attempted,
+			})
+			fmt.Fprintf(progress, "Failed to resolve ISBN %s: %v\n", isbnStr, err)
+			continue
+		}
+
+		metadata.ISBN = isbnStr
+		results[i] = *metadata
+		store.Set(key, cache.Entry{
+			Status:      cache.StatusSuccess,
+			Metadata:    metadata,
+			LastAttempt: attempted,
+		})
+		fmt.Fprintf(progress, "✓ Resolved ISBN %s: %s\n", isbnStr, metadata.Title)
+	}
+
+	return results, failures
+}
+
+// cachedMetadata rebuilds an output row from a cached entry. The ISBN is reset
+// to the spelling this run supplied, because the output row and the errors map
+// are keyed by it — the cache key may be the ISBN-13 form of an ISBN-10 input.
+func cachedMetadata(entry cache.Entry, isbnStr string) resolver.BookMetadata {
+	if entry.Metadata == nil {
+		return resolver.BookMetadata{ISBN: isbnStr}
+	}
+
+	metadata := *entry.Metadata
+	metadata.ISBN = isbnStr
+
+	return metadata
+}
+
+// cachedError reconstitutes the error a cached failure recorded. A hand-edited
+// cache file can carry status "error" with no message, and an empty error
+// string would render as a blank failure reason, so it is named instead.
+func cachedError(entry cache.Entry) error {
+	if entry.Error == "" {
+		return fmt.Errorf("cached failure with no recorded error")
+	}
+
+	return fmt.Errorf("%s", entry.Error)
 }
 
 // getISBNs retrieves ISBNs from command-line args, file, stdin, or Google Sheets
