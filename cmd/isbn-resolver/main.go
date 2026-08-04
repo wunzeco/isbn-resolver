@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wunzeco/isbn-resolver/pkg/cache"
 	"github.com/wunzeco/isbn-resolver/pkg/config"
 	"github.com/wunzeco/isbn-resolver/pkg/isbn"
 	"github.com/wunzeco/isbn-resolver/pkg/output"
@@ -36,6 +37,14 @@ func main() {
 	flag.StringVar(&cfg.SheetsCreateTab, "sheets-create-tab", "", "Create new tab for results")
 	flag.BoolVar(&cfg.SheetsDryRun, "sheets-dry-run", false, "Preview changes without writing")
 
+	// Caching and concurrency flags. Defaults come from cfg so --help shows the
+	// same values DefaultConfig sets, rather than a second set of literals.
+	flag.StringVar(&cfg.CacheFile, "cache-file", cfg.CacheFile, "Resolution cache file path")
+	flag.IntVar(&cfg.Concurrency, "concurrency", cfg.Concurrency, "Number of concurrent resolution workers")
+	flag.BoolVar(&cfg.ResolveAll, "resolve-all", cfg.ResolveAll, "Ignore cached entries and re-resolve every ISBN")
+	flag.BoolVar(&cfg.RetryFailed, "retry-failed", cfg.RetryFailed, "Reuse cached successes but re-attempt cached failures")
+	flag.BoolVar(&cfg.NoCache, "no-cache", cfg.NoCache, "Bypass the cache entirely for this run")
+
 	flag.Parse()
 
 	// Store timeout back to config
@@ -55,6 +64,19 @@ func main() {
 
 	// Override format from flag
 	cfg.Format = output.Format(*formatStr)
+
+	// Resolve the cache-control settings into a single mode before doing any
+	// work, so a contradictory invocation fails immediately rather than after
+	// authenticating with Google Sheets or reading a large input file.
+	cacheMode, err := resolveCacheMode(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if cfg.Verbose {
+		fmt.Fprintf(os.Stderr, "Cache mode: %s\n", cacheMode)
+	}
 
 	// Get ISBNs from various sources
 	isbns, err := getISBNs(cfg)
@@ -154,6 +176,37 @@ func main() {
 		successful := len(validISBNs) - len(errors)
 		fmt.Fprintf(os.Stderr, "\nSummary: %d successful, %d failed out of %d total\n",
 			successful, len(errors), len(validISBNs))
+	}
+}
+
+// resolveCacheMode collapses the three cache-control settings into the single
+// cache.Mode the resolve loop consults (spec §2).
+//
+// --resolve-all and --retry-failed contradict each other, so the combination is
+// rejected rather than silently ranked: a user who asks to re-resolve
+// everything *and* only the failures has a wrong expectation about one of them,
+// and quietly honouring one would hide that. The check runs even alongside
+// --no-cache, where the modes are moot, because the contradiction is still a
+// mistake worth reporting.
+//
+// --no-cache is orthogonal and wins: it disables cache reads and writes
+// outright, which subsumes whatever reuse policy the other two describe.
+func resolveCacheMode(cfg *config.Config) (cache.Mode, error) {
+	if cfg.ResolveAll && cfg.RetryFailed {
+		return cache.ModeNormal, fmt.Errorf(
+			"--resolve-all and --retry-failed are mutually exclusive: " +
+				"--resolve-all re-resolves every ISBN, --retry-failed re-resolves only cached failures")
+	}
+
+	switch {
+	case cfg.NoCache:
+		return cache.ModeNoCache, nil
+	case cfg.ResolveAll:
+		return cache.ModeResolveAll, nil
+	case cfg.RetryFailed:
+		return cache.ModeRetryFailed, nil
+	default:
+		return cache.ModeNormal, nil
 	}
 }
 
