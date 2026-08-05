@@ -2,6 +2,10 @@
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #
 # Binaries for programs and plugins
+# The leading slash anchors this to the repo root so it ignores the build
+# artifact produced by `go build -o isbn-resolver ./cmd/isbn-resolver` without
+# also ignoring the identically-named source directory `cmd/isbn-resolver/`.
+/isbn-resolver
 *.exe
 *.exe~
 *.dll
