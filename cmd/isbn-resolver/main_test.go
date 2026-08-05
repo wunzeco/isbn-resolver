@@ -18,6 +18,7 @@ import (
 
 	"github.com/wunzeco/isbn-resolver/pkg/cache"
 	"github.com/wunzeco/isbn-resolver/pkg/config"
+	"github.com/wunzeco/isbn-resolver/pkg/isbn"
 	"github.com/wunzeco/isbn-resolver/pkg/output"
 	"github.com/wunzeco/isbn-resolver/pkg/resolver"
 	"github.com/wunzeco/isbn-resolver/pkg/sheets"
@@ -1112,6 +1113,69 @@ func TestGetISBNsOnTheMeasurementSample(t *testing.T) {
 		if looksLikeHeader(got) {
 			t.Fatalf("header %q survived into the ISBN list", got)
 		}
+	}
+}
+
+// TestMeasurementSampleKeepsItsTwoInvalidISBNs guards a decision, not a
+// behaviour: the two bad-checksum ISBNs in the sample are deliberate (see
+// specs/third-fallback-api.md, "The two invalid ISBNs stay").
+//
+// They are load-bearing. They are the only rows that exercise the
+// validate-before-request path on the real fixture, and they are the entire
+// reason 490 ISBN rows, 488 rows reaching the resolver and 475 unique valid
+// ISBNs are three different denominators — a distinction the spec's rates have
+// already been got wrong over twice. "Repairing" the check digits looks like
+// tidying and is not: the check digit detects an error without locating it, so
+// the repaired forms (9781782955122, 9780141371283) are different ISBNs that
+// resolve to nothing, which would quietly move two rows from the invalid
+// bucket into the unresolvable one and worsen the headline miss rate.
+//
+// So the checksums must stay broken, and this test is what says so at the
+// moment someone fixes them.
+func TestMeasurementSampleKeepsItsTwoInvalidISBNs(t *testing.T) {
+	path := filepath.Join("..", "..", "examples", "ISBNs.csv")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("measurement sample not present: %v", err)
+	}
+
+	isbns, err := getISBNs(&config.Config{InputFile: path})
+	if err != nil {
+		t.Fatalf("getISBNs: %v", err)
+	}
+
+	// Both must still be in the file, and both must still fail validation.
+	// Editing or deleting a row trips the presence check (a repaired ISBN is a
+	// different string, so it reads as absent); the validity check covers the
+	// other way this can rot, which is isbn.Validate loosening enough to start
+	// accepting them.
+	wantInvalid := []string{"9781782955129", "9780141371284"}
+	for _, want := range wantInvalid {
+		found := false
+		for _, got := range isbns {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("invalid ISBN %s is no longer in the sample; it is deliberate — see specs/third-fallback-api.md", want)
+			continue
+		}
+		if result := isbn.Validate(want); result.Type != isbn.Invalid {
+			t.Errorf("%s now validates as %v, want Invalid; the check digit was repaired — see specs/third-fallback-api.md", want, result.Type)
+		}
+	}
+
+	// And they must be the *only* two, since 488 and 475 are derived by
+	// subtracting exactly 2 from the row and unique counts.
+	invalid := 0
+	for _, got := range isbns {
+		if isbn.Validate(got).Type == isbn.Invalid {
+			invalid++
+		}
+	}
+	if invalid != len(wantInvalid) {
+		t.Errorf("sample holds %d invalid ISBNs, want %d; the 490/488/475 denominators in specs/third-fallback-api.md no longer hold", invalid, len(wantInvalid))
 	}
 }
 

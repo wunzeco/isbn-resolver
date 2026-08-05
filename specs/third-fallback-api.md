@@ -33,7 +33,7 @@ the canonical figures and the only ones that should be quoted going forward:
 | Header rows | 1 (`ISBN`) | first line; skipped by `scanISBNs` |
 | ISBN rows | **490** | pinned by `TestGetISBNsOnTheMeasurementSample` (`cmd/isbn-resolver/main_test.go`) |
 | Unique ISBNs | **477** | 13 duplicate rows across 12 ISBNs, one of which appears three times |
-| Invalid ISBNs (bad ISBN-13 checksum) | **2** | `9781782955129` (line 210), `9780141371284` (line 343); rejected by `isbn.Validate` before any request |
+| Invalid ISBNs (bad ISBN-13 checksum) | **2** | `9781782955129` (line 210), `9780141371284` (line 343); rejected by `isbn.Validate` before any request. **Deliberately kept — see "The two invalid ISBNs stay" below.** Pinned by `TestMeasurementSampleKeepsItsTwoInvalidISBNs` |
 | ISBN rows reaching the resolver | **488** | 490 rows − the 2 invalid; `Processing 488 valid ISBN(s)` in `--verbose` |
 | Unique *valid* ISBNs | **475** | 477 unique − the 2 invalid; this is the denominator a resolution rate is actually measured over |
 | Genuinely unresolvable, post-§0 | **22** (4.6% of 475) | §1 "Residual unresolvable ISBNs (2026-08-06)" — listed individually there |
@@ -52,6 +52,38 @@ Figures are annotated in place
 rather than rewritten, because only the pre-fix run can say what the pre-fix
 run measured — the record of how the number moved is worth more than a
 document that reads as though it were always right.
+
+**The two invalid ISBNs stay (decision, 2026-08-06).** `9781782955129`
+(line 210) and `9780141371284` (line 343) are genuine data-entry errors in the
+source library list, not fixture noise, and they are kept on purpose. Three
+reasons, in order of weight:
+
+1. **A checksum "repair" invents an ISBN rather than recovering one.** The
+   check digit *detects* an error, it does not *locate* it — the wrong digit
+   could be any of the thirteen. Recomputing it yields `9781782955122` and
+   `9780141371283`, and neither is a book: Open Library returns `{}` for both
+   (`curl -s 'https://openlibrary.org/api/books?bibkeys=ISBN:9781782955122&format=json'`).
+   Google Books could not be consulted at the time of the decision — the
+   anonymous daily quota was exhausted — so this is one API's answer, not two.
+   "Fixing" them would therefore move 2 rows out of the invalid bucket and into
+   the unresolvable bucket (490/488/475 → 490/490/477, residual 22 → 24), i.e.
+   it would silently make the headline miss rate *worse* while looking like a
+   cleanup.
+2. **They are the only invalid input in the measurement fixture.** Nothing else
+   in `examples/ISBNs.csv` exercises the validate-before-request path, so a run
+   over this file would otherwise never prove that path works end to end.
+3. **They are why 490, 488 and 475 are three different numbers.** That
+   distinction has been got wrong twice (see the paragraph above) and is now
+   load-bearing for every rate quoted in this document. Removing the ISBNs
+   collapses the three denominators into two and erases the evidence for why
+   the distinction was needed.
+
+The risk this decision accepts is that a future reader "corrects" the check
+digits without noticing. That is guarded mechanically rather than by this
+paragraph: `TestMeasurementSampleKeepsItsTwoInvalidISBNs`
+(`cmd/isbn-resolver/main_test.go`) asserts both ISBNs are still present in the
+sample and still fail `isbn.Validate`, so a repair fails the suite and lands
+the reader here.
 
 **Decision (2026-08-05, final): no third tier.** The project owner reviewed
 the 4.4% residual and decided it does not justify either candidate's cost —
