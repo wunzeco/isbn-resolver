@@ -206,6 +206,41 @@ isbn-resolver 978-0134190440 --no-cache
 - `--verbose` prints a cache breakdown (`Cache: 812 hit, 40 miss, 6 retried`)
   alongside the usual per-ISBN progress output.
 
+### Using the sheet itself as the cache (`--sheet-cache`)
+
+When the tool runs from CI, a container, or any other ephemeral environment,
+`~/.isbn-resolver/cache.json` doesn't survive between runs — so every run
+re-resolves the whole sheet from scratch. `--sheet-cache` uses the results
+already written to the Google Sheets *output* range as the cache instead,
+which does persist:
+
+```bash
+# Second and subsequent runs re-resolve only rows the sheet doesn't already
+# have a Success for, even with no local cache file present
+isbn-resolver --sheets-url "URL" --sheets-range "A2:A" \
+              --sheets-output-range "Sheet1!B2:J" --sheet-cache
+
+# Re-attempt the rows the sheet marks Error, keep its successes
+isbn-resolver --sheets-url "URL" --sheets-range "A2:A" --sheet-cache --retry-failed
+```
+
+- Off by default: it costs one extra read call per run and it assumes the
+  output range holds the columns this tool writes
+  (`ISBN-13, Title, Authors, Publisher, Publication Date, Pages, Categories, Status, Error`).
+- Additive to the local file cache rather than a replacement. Both are
+  consulted and a hit in *either* is enough to skip an ISBN, so a workstation
+  cache and a shared sheet complement each other. `--no-cache` ignores both.
+- `--resolve-all` and `--retry-failed` mean the same thing for the sheet
+  cache as for the local one: `--resolve-all` re-resolves regardless of
+  `Status`, `--retry-failed` keeps `Success` rows and re-attempts `Error`
+  rows.
+- Metadata is reused from the existing row, so a skipped row is rewritten
+  with what the sheet already held instead of being blanked.
+- Requires `--sheets-url`/`--sheets-id`; with no sheet configured it warns
+  rather than silently doing nothing. Read failures (permissions, an
+  unreachable API, an output range that doesn't exist yet) are warnings too —
+  the run continues without the cache, since a cache can only ever save work.
+
 ### Google Books API key (optional)
 
 Google Books requests are anonymous by default, which draws on a shared
@@ -254,6 +289,7 @@ those messages reach stderr and are stored in the cache file.
 | `--resolve-all` | Ignore cached entries and re-resolve every ISBN | false |
 | `--retry-failed` | Reuse cached successes but re-attempt cached failures | false |
 | `--no-cache` | Bypass the cache entirely for this run | false |
+| `--sheet-cache` | Treat `Success` rows already in the Sheets output range as cache hits | false |
 | `--google-books-api-key` | Google Books API key (optional; see below) | - |
 
 ### Environment Variables
@@ -282,6 +318,7 @@ Create a JSON configuration file:
   "concurrency": 5,
   "resolve_all": false,
   "retry_failed": false,
+  "sheet_cache": false,
   "rate_limit": {
     "max_retries": 3,
     "base_backoff": "500ms"

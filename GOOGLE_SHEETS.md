@@ -306,7 +306,8 @@ Create a config file with Google Sheets settings:
   "sheets_url": "https://docs.google.com/spreadsheets/d/YOUR_ID/edit",
   "sheets_range": "Sheet1!A2:A",
   "sheets_output_range": "Sheet1!B2:J",
-  "sheets_credentials": "/path/to/credentials.json"
+  "sheets_credentials": "/path/to/credentials.json",
+  "sheet_cache": true
 }
 ```
 
@@ -314,6 +315,43 @@ Use it:
 ```bash
 isbn-resolver --config my-config.json
 ```
+
+### Reusing the Sheet as a Cache (`--sheet-cache`)
+
+Resolved results are normally reused from a local cache file
+(`~/.isbn-resolver/cache.json`). That file doesn't exist in CI, a container,
+or any other environment that starts clean, so every run there re-resolves
+the entire sheet — hundreds of API calls to rediscover rows the sheet is
+already holding.
+
+`--sheet-cache` reads the *output* range before resolving and treats rows
+already marked `Success` as cache hits, reusing their metadata:
+
+```bash
+isbn-resolver --sheets-id "YOUR_SHEET_ID" \
+              --sheets-range "Sheet1!A2:A" \
+              --sheets-output-range "Sheet1!B2:J" \
+              --sheet-cache \
+              --verbose
+```
+
+- Off by default: it costs an extra read call and assumes the output range
+  holds the columns this tool writes (see [Output Format](#output-format)).
+- It combines with the local cache rather than replacing it — both are
+  consulted, and a hit in either skips the ISBN. `--no-cache` ignores both.
+- `--retry-failed` re-attempts rows marked `Error` while keeping `Success`
+  rows; `--resolve-all` re-resolves everything regardless of `Status`.
+- With `--sheets-create-tab`, the read follows the new tab, so the range read
+  is always the range written.
+- Failure to read the sheet cache (missing permissions, a first run with an
+  empty output range) is a warning, not an error: the run continues and
+  simply resolves everything.
+
+This is what makes a scheduled run (see [Automation with Cron](#automation-with-cron)
+below) cheap to repeat: only newly added ISBNs cost API calls, whether or not
+the machine keeps a cache file between runs. Note that a run writing to a
+fresh tab each time (`--sheets-create-tab "Results $(date +%F)"`) has nothing
+to read back, so keep a stable output range if you want the cache to hit.
 
 ### Processing Multiple Sheets
 

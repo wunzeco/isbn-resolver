@@ -6,6 +6,7 @@
   "concurrency": 5,
   "resolve_all": false,
   "retry_failed": false,
+  "sheet_cache": false,
   "rate_limit": {
     "max_retries": 3,
     "base_backoff": "500ms"
