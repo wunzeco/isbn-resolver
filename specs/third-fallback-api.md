@@ -136,6 +136,15 @@ Do this first — it determines which of §2's two candidate APIs is worth
 building, and whether a third tier is even the right fix (as opposed to,
 e.g., a bug in ISBN normalization causing false failures).
 
+**Correction (2026-08-05): the sample is 490 ISBNs, not 488 or 489.**
+`examples/ISBNs.csv` has CRLF endings and no trailing newline, so `wc -l`
+under-reports it by one. It is 491 content lines = 1 header row + 490 ISBNs,
+of which 477 are unique (13 duplicate rows, not the 2 recorded below). The
+header row was also being fed in as an ISBN until `scanISBNs` learned to skip
+it, so every failure count quoted in this spec has an inflated numerator *and*
+an unreliable denominator. Treat the numbers below as indicative only; the
+plan's re-measurement item supersedes them.
+
 **Status: partially run, results contaminated by §0's bugs — re-run after
 fixing §0.** What's known so far from the `examples/ISBNs.csv` run:
 
