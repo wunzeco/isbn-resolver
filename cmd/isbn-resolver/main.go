@@ -291,6 +291,14 @@ func (c *cliFlags) resolveConfig() (*config.Config, error) {
 	cfg.LoadFromEnv()
 	c.applyTo(cfg)
 
+	// A config file may set "cache_file": "" explicitly (or a blank flag/env
+	// value could, in principle, overwrite the default). cache.Load("") fails
+	// with an opaque "open : no such file or directory" rather than a message
+	// that points at the setting, so treat empty the same as "unset".
+	if cfg.CacheFile == "" {
+		cfg.CacheFile = cache.DefaultFile
+	}
+
 	return cfg, nil
 }
 

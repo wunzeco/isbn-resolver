@@ -191,6 +191,23 @@ func TestResolveConfigWithoutFile(t *testing.T) {
 	})
 }
 
+// TestResolveConfigEmptyCacheFileFallsBackToDefault covers a config file that
+// sets "cache_file": "" explicitly. Without this fallback, cache.Load("")
+// fails with an opaque "open : no such file or directory" and the run exits 1
+// before doing any work, even though the file's only mistake is an empty
+// string where the key could just as well have been omitted.
+func TestResolveConfigEmptyCacheFileFallsBackToDefault(t *testing.T) {
+	path := writeConfigFile(t, `{"cache_file": ""}`)
+	cfg, err := parseArgs(t, "--config", path).resolveConfig()
+	if err != nil {
+		t.Fatalf("resolveConfig() error = %v", err)
+	}
+
+	if cfg.CacheFile != cache.DefaultFile {
+		t.Errorf("cache_file = %q, want %q", cfg.CacheFile, cache.DefaultFile)
+	}
+}
+
 // TestResolveConfigUnreadableFileFails makes an explicitly-passed --config
 // that cannot be read a hard failure rather than a warning: the flag only
 // exists because the user asked for that specific file, so falling back to
