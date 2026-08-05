@@ -43,6 +43,14 @@ type APIClient struct {
 	// exponentially from it (base * 2^attempt), before jitter is added.
 	BaseBackoff time.Duration
 
+	// Limiter, when set, is acquired before every outbound request
+	// (including retries) to pace the request rate proactively. It is
+	// nil by default (no limiting) so a single client used without a
+	// worker pool is unaffected; a pool of workers should share one
+	// APIClient (or assign the same *RateLimiter to each client) so the
+	// limit applies across all of them, per spec §4.
+	Limiter *RateLimiter
+
 	// sleep and jitter are overridable in tests so retry tests don't
 	// actually wait out real backoff delays.
 	sleep  func(time.Duration)

@@ -47,6 +47,7 @@ func (c *APIClient) doWithRetry(fn func() (*http.Response, error)) (*http.Respon
 	}
 
 	for attempt := 0; ; attempt++ {
+		c.Limiter.Wait()
 		resp, err := fn()
 		if err != nil {
 			return nil, err
