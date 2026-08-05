@@ -22,10 +22,17 @@ type BookMetadata struct {
 	Error           string   `json:"error,omitempty"`
 }
 
+const (
+	defaultOpenLibraryBaseURL = "https://openlibrary.org"
+	defaultGoogleBooksBaseURL = "https://www.googleapis.com/books/v1"
+)
+
 // APIClient handles API requests to book metadata services
 type APIClient struct {
-	httpClient *http.Client
-	timeout    time.Duration
+	httpClient         *http.Client
+	timeout            time.Duration
+	OpenLibraryBaseURL string
+	GoogleBooksBaseURL string
 }
 
 // NewAPIClient creates a new API client
@@ -34,7 +41,9 @@ func NewAPIClient(timeout time.Duration) *APIClient {
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-		timeout: timeout,
+		timeout:            timeout,
+		OpenLibraryBaseURL: defaultOpenLibraryBaseURL,
+		GoogleBooksBaseURL: defaultGoogleBooksBaseURL,
 	}
 }
 
@@ -57,7 +66,7 @@ func (c *APIClient) Resolve(isbn string) (*BookMetadata, error) {
 
 // fetchFromOpenLibrary fetches book data from Open Library API
 func (c *APIClient) fetchFromOpenLibrary(isbn string) (*BookMetadata, error) {
-	apiURL := fmt.Sprintf("https://openlibrary.org/api/books?bibkeys=ISBN:%s&format=json&jscmd=data", isbn)
+	apiURL := fmt.Sprintf("%s/api/books?bibkeys=ISBN:%s&format=json&jscmd=data", c.OpenLibraryBaseURL, isbn)
 
 	resp, err := c.httpClient.Get(apiURL)
 	if err != nil {
@@ -137,7 +146,7 @@ func (c *APIClient) fetchFromOpenLibrary(isbn string) (*BookMetadata, error) {
 
 // fetchFromGoogleBooks fetches book data from Google Books API
 func (c *APIClient) fetchFromGoogleBooks(isbn string) (*BookMetadata, error) {
-	apiURL := fmt.Sprintf("https://www.googleapis.com/books/v1/volumes?q=isbn:%s", url.QueryEscape(isbn))
+	apiURL := fmt.Sprintf("%s/volumes?q=isbn:%s", c.GoogleBooksBaseURL, url.QueryEscape(isbn))
 
 	resp, err := c.httpClient.Get(apiURL)
 	if err != nil {
