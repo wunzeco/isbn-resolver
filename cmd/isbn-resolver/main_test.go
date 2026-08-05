@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,14 +211,21 @@ func TestEveryFlagHasAnOverride(t *testing.T) {
 // countingResolver stands in for the API client and records which ISBNs it was
 // asked to resolve. The value of the cache is the calls it prevents, and a call
 // that never happens is only observable here.
+//
+// resolveISBNs now dispatches misses across a worker pool, so Resolve can be
+// called from multiple goroutines concurrently — the mutex is what keeps
+// `go test -race` clean.
 type countingResolver struct {
+	mu     sync.Mutex
 	calls  []string
 	fail   map[string]bool
 	titles map[string]string
 }
 
 func (r *countingResolver) Resolve(isbnStr string) (*resolver.BookMetadata, error) {
+	r.mu.Lock()
 	r.calls = append(r.calls, isbnStr)
+	r.mu.Unlock()
 
 	if r.fail[isbnStr] {
 		return nil, fmt.Errorf("upstream said no")
@@ -248,7 +256,7 @@ func runOnce(t *testing.T, path string, mode cache.Mode, client bookResolver, is
 	}
 
 	policy := cache.NewPolicy(store, mode)
-	results, failures := resolveISBNs(isbns, client, store, policy, io.Discard)
+	results, failures := resolveISBNs(4, isbns, client, store, policy, io.Discard)
 
 	if mode.Persists() {
 		if err := store.Save(path); err != nil {
@@ -418,7 +426,7 @@ func TestResolveISBNsRepeatedInputResolvesOnce(t *testing.T) {
 
 	results, _, _ := func() ([]resolver.BookMetadata, map[string]error, cache.Counters) {
 		policy := cache.NewPolicy(store, cache.ModeNormal)
-		r, f := resolveISBNs([]string{"9780134190440", "9780134190440"}, client, store, policy, io.Discard)
+		r, f := resolveISBNs(4, []string{"9780134190440", "9780134190440"}, client, store, policy, io.Discard)
 		return r, f, policy.Counters()
 	}()
 

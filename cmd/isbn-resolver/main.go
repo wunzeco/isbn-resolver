@@ -85,7 +85,7 @@ func main() {
 
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "Loaded cache: %d entries (%s)\n", bookCache.Len(), cfg.CacheFile)
-		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s)...\n", len(validISBNs))
+		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s) with %d worker(s)...\n", len(validISBNs), cfg.Concurrency)
 	}
 
 	// Create API client
@@ -98,9 +98,8 @@ func main() {
 		progress = os.Stderr
 	}
 
-	// Process ISBNs sequentially — the worker pool lands separately.
 	policy := cache.NewPolicy(bookCache, cacheMode)
-	results, errors := resolveISBNs(validISBNs, client, bookCache, policy, progress)
+	results, errors := resolveISBNs(cfg.Concurrency, validISBNs, client, bookCache, policy, progress)
 
 	if cfg.Verbose {
 		counters := policy.Counters()
@@ -326,20 +325,36 @@ type bookResolver interface {
 	Resolve(isbn string) (*resolver.BookMetadata, error)
 }
 
-// resolveISBNs resolves each ISBN in order, consulting the cache first.
+// resolveISBNs resolves each ISBN, consulting the cache first, then resolving
+// every cache miss across a bounded worker pool.
 //
 // The cache is read through rather than around: a policy hit fills the output
-// slot straight from the cached entry with no network call, and every attempt
-// that *is* made is recorded back into store immediately. Recording as we go
-// (rather than collecting and writing once at the end) means a repeated ISBN
-// within a single input list also costs one call, and a run interrupted before
-// the final Save has still populated the in-memory cache consistently.
+// slot straight from the cached entry with no network call. The lookup pass
+// itself stays on this goroutine — cache.Policy is not safe for concurrent
+// use (see its doc comment) — and only the misses are handed to
+// resolver.Resolve for parallel resolution.
+//
+// Misses are grouped by cache key before dispatch, not resolved one-per-index,
+// so a repeated ISBN within a single input list still costs one network call
+// (matching the pre-pool behaviour of recording as the loop went). Every
+// group's result is applied back to store and to all of that group's output
+// slots sequentially, on this goroutine, after resolver.Resolve returns — the
+// single collector that lets cache writes, the failures map, and progress
+// output stay race-free with no mutex.
 //
 // Cached failures are replayed as errors, not as empty successes, so a cache
 // hit and a fresh resolution produce byte-identical output for the same ISBN.
-func resolveISBNs(isbns []string, client bookResolver, store *cache.Cache, policy *cache.Policy, progress io.Writer) ([]resolver.BookMetadata, map[string]error) {
+func resolveISBNs(concurrency int, isbns []string, client bookResolver, store *cache.Cache, policy *cache.Policy, progress io.Writer) ([]resolver.BookMetadata, map[string]error) {
 	results := make([]resolver.BookMetadata, len(isbns))
 	failures := make(map[string]error)
+
+	type miss struct {
+		index int
+		isbn  string
+	}
+
+	missesByKey := make(map[string][]miss)
+	var missKeys []string
 
 	for i, isbnStr := range isbns {
 		key := cache.Key(isbnStr)
@@ -352,29 +367,56 @@ func resolveISBNs(isbns []string, client bookResolver, store *cache.Cache, polic
 			continue
 		}
 
-		metadata, err := client.Resolve(isbnStr)
+		if _, seen := missesByKey[key]; !seen {
+			missKeys = append(missKeys, key)
+		}
+		missesByKey[key] = append(missesByKey[key], miss{index: i, isbn: isbnStr})
+	}
+
+	if len(missKeys) == 0 {
+		return results, failures
+	}
+
+	// One representative ISBN spelling per key is enough to resolve the
+	// group; every group member gets the same metadata back, reset to its
+	// own spelling by cachedMetadata's non-cache counterpart below.
+	representatives := make([]string, len(missKeys))
+	for i, key := range missKeys {
+		representatives[i] = missesByKey[key][0].isbn
+	}
+
+	resolved := resolver.Resolve(concurrency, representatives, client.Resolve)
+
+	for i, res := range resolved {
+		key := missKeys[i]
+		group := missesByKey[key]
 		attempted := time.Now().UTC()
 
-		if err != nil {
-			failures[isbnStr] = err
-			results[i] = resolver.BookMetadata{ISBN: isbnStr}
+		if res.Err != nil {
 			store.Set(key, cache.Entry{
 				Status:      cache.StatusError,
-				Error:       err.Error(),
+				Error:       res.Err.Error(),
 				LastAttempt: attempted,
 			})
-			fmt.Fprintf(progress, "Failed to resolve ISBN %s: %v\n", isbnStr, err)
+			for _, m := range group {
+				failures[m.isbn] = res.Err
+				results[m.index] = resolver.BookMetadata{ISBN: m.isbn}
+			}
+			fmt.Fprintf(progress, "Failed to resolve ISBN %s: %v\n", group[0].isbn, res.Err)
 			continue
 		}
 
-		metadata.ISBN = isbnStr
-		results[i] = *metadata
 		store.Set(key, cache.Entry{
 			Status:      cache.StatusSuccess,
-			Metadata:    metadata,
+			Metadata:    res.Metadata,
 			LastAttempt: attempted,
 		})
-		fmt.Fprintf(progress, "✓ Resolved ISBN %s: %s\n", isbnStr, metadata.Title)
+		for _, m := range group {
+			metadata := *res.Metadata
+			metadata.ISBN = m.isbn
+			results[m.index] = metadata
+		}
+		fmt.Fprintf(progress, "✓ Resolved ISBN %s: %s\n", group[0].isbn, res.Metadata.Title)
 	}
 
 	return results, failures
