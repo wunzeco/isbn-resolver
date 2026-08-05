@@ -293,10 +293,10 @@ func TestLoadFromFile(t *testing.T) {
 
 func TestLoadFromFileWithVariousTimeouts(t *testing.T) {
 	tests := []struct {
-		name           string
-		timeoutStr     string
-		expectedDur    time.Duration
-		shouldError    bool
+		name        string
+		timeoutStr  string
+		expectedDur time.Duration
+		shouldError bool
 	}{
 		{
 			name:        "30 seconds",
@@ -350,7 +350,7 @@ func TestLoadFromFileWithVariousTimeouts(t *testing.T) {
 			tmpFile.Close()
 
 			cfg, err := LoadFromFile(tmpFile.Name())
-			
+
 			if tt.shouldError {
 				if err == nil {
 					t.Errorf("Expected error but got none")

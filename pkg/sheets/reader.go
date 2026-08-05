@@ -35,11 +35,11 @@ func (c *Client) ReadISBNs(config SheetConfig) ([]string, error) {
 		cellValue = strings.TrimSpace(cellValue)
 
 		// Skip empty cells and headers (common patterns)
-		if cellValue == "" || 
-		   strings.EqualFold(cellValue, "isbn") || 
-		   strings.EqualFold(cellValue, "isbn-10") || 
-		   strings.EqualFold(cellValue, "isbn-13") ||
-		   strings.EqualFold(cellValue, "isbn number") {
+		if cellValue == "" ||
+			strings.EqualFold(cellValue, "isbn") ||
+			strings.EqualFold(cellValue, "isbn-10") ||
+			strings.EqualFold(cellValue, "isbn-13") ||
+			strings.EqualFold(cellValue, "isbn number") {
 			continue
 		}
 

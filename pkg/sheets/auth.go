@@ -20,7 +20,7 @@ const (
 
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
-	CredentialsPath string
+	CredentialsPath   string
 	UseServiceAccount bool
 }
 

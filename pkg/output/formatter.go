@@ -58,35 +58,35 @@ func (f *Formatter) formatText(metadata *resolver.BookMetadata, err error) error
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("ISBN: %s\n", metadata.ISBN))
-	
+
 	if metadata.ISBN13 != "" {
 		sb.WriteString(fmt.Sprintf("ISBN-13: %s\n", metadata.ISBN13))
 	}
-	
+
 	if metadata.Title != "" {
 		sb.WriteString(fmt.Sprintf("Title: %s\n", metadata.Title))
 	}
-	
+
 	if len(metadata.Authors) > 0 {
 		sb.WriteString(fmt.Sprintf("Authors: %s\n", strings.Join(metadata.Authors, ", ")))
 	}
-	
+
 	if metadata.Publisher != "" {
 		sb.WriteString(fmt.Sprintf("Publisher: %s\n", metadata.Publisher))
 	}
-	
+
 	if metadata.PublicationDate != "" {
 		sb.WriteString(fmt.Sprintf("Publication Date: %s\n", metadata.PublicationDate))
 	}
-	
+
 	if metadata.Pages > 0 {
 		sb.WriteString(fmt.Sprintf("Pages: %d\n", metadata.Pages))
 	}
-	
+
 	if len(metadata.Categories) > 0 {
 		sb.WriteString(fmt.Sprintf("Categories: %s\n", strings.Join(metadata.Categories, ", ")))
 	}
-	
+
 	sb.WriteString("Status: ✓ Resolved\n\n---\n\n")
 
 	_, err = f.writer.Write([]byte(sb.String()))
@@ -108,10 +108,10 @@ func (f *Formatter) FormatBatch(results []resolver.BookMetadata, errors map[stri
 // formatJSON formats output as JSON
 func (f *Formatter) formatJSON(results []resolver.BookMetadata, errors map[string]error) error {
 	type resultEntry struct {
-		ISBN   string                  `json:"isbn"`
-		Status string                  `json:"status"`
-		Data   *resolver.BookMetadata  `json:"data,omitempty"`
-		Error  string                  `json:"error,omitempty"`
+		ISBN   string                 `json:"isbn"`
+		Status string                 `json:"status"`
+		Data   *resolver.BookMetadata `json:"data,omitempty"`
+		Error  string                 `json:"error,omitempty"`
 	}
 
 	output := struct {

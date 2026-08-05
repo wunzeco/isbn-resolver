@@ -35,11 +35,11 @@ func ExtractSheetID(urlOrID string) string {
 	// Pattern to match Google Sheets URL
 	pattern := regexp.MustCompile(`/spreadsheets/d/([a-zA-Z0-9-_]+)`)
 	matches := pattern.FindStringSubmatch(urlOrID)
-	
+
 	if len(matches) > 1 {
 		return matches[1]
 	}
-	
+
 	// Assume it's already an ID
 	return urlOrID
 }

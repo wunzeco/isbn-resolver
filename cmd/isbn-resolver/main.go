@@ -122,7 +122,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error writing to Google Sheets: %v\n", err)
 			os.Exit(1)
 		}
-		
+
 		if cfg.Verbose {
 			successful := len(validISBNs) - len(errors)
 			fmt.Fprintf(os.Stderr, "\nSummary: %d successful, %d failed out of %d total\n",
@@ -549,7 +549,7 @@ func getISBNsFromSheets(cfg *config.Config) ([]string, error) {
 
 	// Read ISBNs
 	client := sheets.NewClient(ctx, service)
-	
+
 	sheetConfig := sheets.SheetConfig{
 		SpreadsheetID: spreadsheetID,
 		Range:         cfg.SheetsRange,
@@ -624,4 +624,3 @@ func writeToSheets(cfg *config.Config, results []resolver.BookMetadata, errors m
 
 	return nil
 }
-

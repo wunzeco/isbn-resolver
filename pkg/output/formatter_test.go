@@ -32,7 +32,7 @@ func TestFormatText(t *testing.T) {
 	}
 
 	output := buf.String()
-	
+
 	// Check that key fields are present
 	requiredFields := []string{
 		"ISBN: 9780134190440",
@@ -72,7 +72,7 @@ func TestFormatJSON(t *testing.T) {
 	}
 
 	output := buf.String()
-	
+
 	// Check that JSON structure is present
 	requiredFields := []string{
 		`"results"`,

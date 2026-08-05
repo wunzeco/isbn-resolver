@@ -116,7 +116,7 @@ func (c *Client) previewResults(config WriteConfig, results []resolver.BookMetad
 	fmt.Println("=============================")
 	fmt.Printf("Spreadsheet ID: %s\n", config.SpreadsheetID)
 	fmt.Printf("Output Range: %s\n", config.OutputRange)
-	
+
 	if config.CreateNewTab != "" {
 		fmt.Printf("Would create new tab: %s\n", config.CreateNewTab)
 	}
@@ -124,7 +124,7 @@ func (c *Client) previewResults(config WriteConfig, results []resolver.BookMetad
 	fmt.Printf("\nWould write %d rows:\n\n", len(results)+1)
 
 	values := c.formatResultsForSheet(results, errors)
-	
+
 	// Print first few rows as preview
 	maxPreview := 5
 	if len(values) < maxPreview {
