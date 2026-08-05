@@ -868,29 +868,77 @@ func marshalsAsScalar(typ reflect.Type) bool {
 // configJSONKeys returns every JSON key on Config, flattening nested objects
 // into "parent.child" form. Derived by reflection rather than listed, so a new
 // field cannot be added to Config without this test noticing it.
+//
+// It fails the test rather than returning keys for a *pointer* to a nested
+// object, because Config must not hold one — see jsonKeysOf.
 func configJSONKeys(t *testing.T, typ reflect.Type) []string {
 	t.Helper()
 
+	keys, err := jsonKeysOf(typ)
+	if err != nil {
+		t.Fatalf("%s: %v", typ, err)
+	}
+	return keys
+}
+
+// jsonKeysOf is configJSONKeys' logic without the *testing.T, so the rules it
+// enforces can themselves be asserted on rather than only tripped over.
+//
+// Config deliberately holds no pointer-to-nested-object field, and this is
+// where that constraint is enforced. The reason is LoadFromFile: it unmarshals
+// the file *over* DefaultConfig(), which is what lets a partial config file
+// keep the defaults for everything it omits. That merge only works for a value
+// struct or an already-allocated pointer — encoding/json allocates a fresh
+// zero struct for a nil pointer field, so `{"rate_limit":{"burst":2}}` against
+// a nil *RateLimit would silently zero max_retries, base_backoff and
+// requests_per_second instead of leaving them at their defaults. A run would
+// then pace itself with settings the user never asked for.
+//
+// Flattening such a field here would have hidden exactly that: the examples
+// already carry rate_limit.* keys, so TestExampleConfigsMatchDefaults would go
+// on passing while the merge quietly broke. Failing loudly at the point the
+// field is added is the whole value of deriving these keys by reflection.
+func jsonKeysOf(typ reflect.Type) ([]string, error) {
 	var keys []string
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
 		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
 		if name == "" || name == "-" {
-			t.Fatalf("field %s has no usable json tag", field.Name)
+			return nil, fmt.Errorf("field %s has no usable json tag", field.Name)
+		}
+
+		// A pointer to something that marshals as a nested object is rejected,
+		// not flattened. Pointers to scalars (*bool for a tri-state, say) are
+		// fine and fall through to the leaf branch below, as does a pointer to
+		// a scalar-marshalling struct such as *time.Time.
+		if field.Type.Kind() == reflect.Pointer && marshalsAsObject(field.Type.Elem()) {
+			return nil, fmt.Errorf("field %s (json %q, type %s) is a pointer to a nested object: "+
+				"Config must use a value struct so LoadFromFile's unmarshal-over-defaults "+
+				"merge preserves the keys the file omits", field.Name, name, field.Type)
 		}
 
 		// Only struct fields that are *not* their own JSON scalar recurse.
 		// Duration is a named integer type with custom marshalling, so it is
 		// a leaf despite not being a plain builtin.
-		if field.Type.Kind() == reflect.Struct && !marshalsAsScalar(field.Type) {
-			for _, nested := range configJSONKeys(t, field.Type) {
-				keys = append(keys, name+"."+nested)
+		if marshalsAsObject(field.Type) {
+			nested, err := jsonKeysOf(field.Type)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+			for _, key := range nested {
+				keys = append(keys, name+"."+key)
 			}
 			continue
 		}
 		keys = append(keys, name)
 	}
-	return keys
+	return keys, nil
+}
+
+// marshalsAsObject reports whether typ reaches JSON as an object of its own
+// fields, which is the only shape worth flattening into "parent.child" keys.
+func marshalsAsObject(typ reflect.Type) bool {
+	return typ.Kind() == reflect.Struct && !marshalsAsScalar(typ)
 }
 
 // The three fixtures below stand in for the shapes Config does not currently
@@ -969,6 +1017,95 @@ func TestConfigJSONKeysTreatsScalarStructsAsLeaves(t *testing.T) {
 	got := configJSONKeys(t, reflect.TypeOf(fixture{}))
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("configJSONKeys() = %v, want %v", got, want)
+	}
+}
+
+// TestJSONKeysOfRejectsPointerToNestedObject pins the mirror image of the rule
+// above: a *struct field marshals as a nested object, so the kind check alone
+// would drop it on the leaf branch and demand a single "rate_limit" key of the
+// examples instead of "rate_limit.max_retries".
+//
+// The rule is to reject rather than to flatten, because such a field must not
+// be added to Config at all — a nil pointer defeats LoadFromFile's
+// unmarshal-over-DefaultConfig merge (see jsonKeysOf). Flattening would have
+// let that ship with every example-config assertion still green.
+func TestJSONKeysOfRejectsPointerToNestedObject(t *testing.T) {
+	tests := []struct {
+		name    string
+		typ     reflect.Type
+		wantErr bool
+		want    []string
+	}{
+		{
+			name: "pointer to nested object is rejected",
+			typ: reflect.TypeOf(struct {
+				Limits *RateLimit `json:"rate_limit"`
+			}{}),
+			wantErr: true,
+		},
+		{
+			// The reason the rejection is narrow: a pointer is a perfectly
+			// ordinary way to express "the file did or did not set this", and
+			// it contributes exactly one key either way.
+			name: "pointer to scalar stays a leaf",
+			typ: reflect.TypeOf(struct {
+				Enabled *bool `json:"enabled"`
+			}{}),
+			want: []string{"enabled"},
+		},
+		{
+			// A pointer to a struct that marshals as a scalar is a leaf too —
+			// it never contributes nested keys, so the merge hazard the
+			// rejection guards against does not apply to it.
+			name: "pointer to scalar-marshalling struct stays a leaf",
+			typ: reflect.TypeOf(struct {
+				Amount *valueScalar `json:"amount"`
+			}{}),
+			want: []string{"amount"},
+		},
+		{
+			// Nesting is one level deep on Config today; the rejection must
+			// still fire when the offending field is deeper than the top.
+			name: "pointer nested below the top level is rejected",
+			typ: reflect.TypeOf(struct {
+				Outer struct {
+					Limits *RateLimit `json:"rate_limit"`
+				} `json:"outer"`
+			}{}),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := jsonKeysOf(tt.typ)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("jsonKeysOf() = %v, want an error", got)
+				}
+				// The message has to name the field, since the whole point is
+				// to tell whoever added it what to do instead.
+				if !strings.Contains(err.Error(), "rate_limit") {
+					t.Errorf("error %q does not name the offending field", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("jsonKeysOf() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("jsonKeysOf() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestConfigHoldsNoPointerToNestedObject applies that rule to the real Config.
+// TestExampleConfigsMatchDefaults would also trip over it, but only as a
+// confusing "example is missing key rate_limit" failure; this one says why.
+func TestConfigHoldsNoPointerToNestedObject(t *testing.T) {
+	if _, err := jsonKeysOf(reflect.TypeOf(Config{})); err != nil {
+		t.Fatalf("Config: %v", err)
 	}
 }
 
