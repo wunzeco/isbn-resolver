@@ -25,6 +25,16 @@ const (
 )
 
 // Entry is one cached resolution attempt.
+//
+// There is deliberately no `source` field naming the API tier that answered.
+// The tier describes one resolution rather than the book, so it rides on
+// resolver.Result (see specs/third-fallback-api.md §4) and stops at the cache
+// boundary. Persisting it here would report "unknown" for every entry written
+// before the field existed — precisely the entries whose provenance is worth
+// knowing — and sheet-cache entries could never carry it at all, since
+// sheets.ReadExistingStatus rebuilds metadata from nine output columns that
+// have no room for it. A cold run (--no-cache or --resolve-all) is the way to
+// ask which tier is carrying a collection.
 type Entry struct {
 	Status      Status                 `json:"status"`
 	Metadata    *resolver.BookMetadata `json:"metadata,omitempty"`
