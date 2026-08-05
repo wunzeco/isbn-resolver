@@ -96,17 +96,22 @@ type ExistingRow struct {
 // there, keyed by cache.Key so the result drops straight into the same lookup
 // the local cache uses.
 //
+// It takes the same WriteConfig WriteResults does, rather than a bare range,
+// because "where the results are" is a function of the whole config —
+// --create-new-tab moves it — and a reader that resolved that differently from
+// the writer would be a cache pointed at the wrong sheet.
+//
 // A range with no data — the first-ever run, or a tab that doesn't exist yet
 // because --create-new-tab hasn't run — yields an empty map and no error. That
 // is the normal first-run path, not a failure. Rows whose Status column holds
 // neither Success nor Error are omitted rather than guessed at.
-func (c *Client) ReadExistingStatus(spreadsheetID, outputRange string) (map[string]ExistingRow, error) {
-	readRange, err := outputReadRange(outputRange)
+func (c *Client) ReadExistingStatus(config WriteConfig) (map[string]ExistingRow, error) {
+	readRange, err := outputReadRange(effectiveOutputRange(config))
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(c.ctx).Do()
+	resp, err := c.service.Spreadsheets.Values.Get(config.SpreadsheetID, readRange).Context(c.ctx).Do()
 	if err != nil {
 		// A range naming a tab that doesn't exist yet is indistinguishable from
 		// an empty one for our purposes: there is nothing cached either way. A

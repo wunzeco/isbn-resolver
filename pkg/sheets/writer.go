@@ -36,23 +36,12 @@ func (c *Client) WriteResults(config WriteConfig, results []resolver.BookMetadat
 		if err := c.createNewTab(config.SpreadsheetID, config.CreateNewTab); err != nil {
 			return fmt.Errorf("failed to create new tab: %w", err)
 		}
-		// Update output range to use the new tab
-		if config.OutputRange == "" {
-			config.OutputRange = fmt.Sprintf("%s!A1", config.CreateNewTab)
-		} else if !strings.Contains(config.OutputRange, "!") {
-			config.OutputRange = fmt.Sprintf("%s!%s", config.CreateNewTab, config.OutputRange)
-		}
 	}
 
 	// Convert results to sheet values
 	values := c.formatResultsForSheet(results, errors)
 
-	// Determine the range to write to
-	writeRange := config.OutputRange
-	if writeRange == "" {
-		// Default to writing next to the input column
-		writeRange = defaultOutputRange
-	}
+	writeRange := effectiveOutputRange(config)
 
 	// Prepare the update request
 	valueRange := &sheets.ValueRange{
@@ -71,6 +60,40 @@ func (c *Client) WriteResults(config WriteConfig, results []resolver.BookMetadat
 	}
 
 	return nil
+}
+
+// effectiveOutputRange resolves a WriteConfig to the single range results
+// actually land in.
+//
+// It is shared with ReadExistingStatus because the sheet cache is only a cache
+// if it reads the range the results were written to. --create-new-tab redirects
+// the write to a tab the configured range never names, so a reader that took
+// OutputRange at face value would read a *different* tab — silently missing
+// every cache hit, or worse, matching an unrelated sheet that happens to have a
+// Status column.
+func effectiveOutputRange(config WriteConfig) string {
+	outputRange := strings.TrimSpace(config.OutputRange)
+
+	if config.CreateNewTab == "" {
+		if outputRange == "" {
+			return defaultOutputRange
+		}
+		return outputRange
+	}
+
+	switch {
+	case outputRange == "":
+		// A freshly created tab is empty, so results start at its first cell.
+		// The default anchor is only a default because it exists to sit beside
+		// an input column that isn't there on a new tab.
+		return fmt.Sprintf("%s!A1", config.CreateNewTab)
+	case strings.Contains(outputRange, "!"):
+		// Already tab-qualified: the range names its own destination, and
+		// overriding that would ignore what the user asked for.
+		return outputRange
+	default:
+		return fmt.Sprintf("%s!%s", config.CreateNewTab, outputRange)
+	}
 }
 
 // formatResultsForSheet converts book metadata to sheet rows

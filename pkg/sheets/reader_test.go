@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/wunzeco/isbn-resolver/pkg/cache"
@@ -58,7 +59,7 @@ func TestReadExistingStatusPopulatedRange(t *testing.T) {
 
 	client := newTestClient(t, valuesHandler(t, values))
 
-	existing, err := client.ReadExistingStatus("sheet-id", "Results!A1")
+	existing, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"})
 	if err != nil {
 		t.Fatalf("ReadExistingStatus() error = %v", err)
 	}
@@ -117,7 +118,7 @@ func TestReadExistingStatusEmptyRange(t *testing.T) {
 	// nothing. That must read as "nothing cached", not as a failure.
 	client := newTestClient(t, valuesHandler(t, nil))
 
-	existing, err := client.ReadExistingStatus("sheet-id", "Results!A1")
+	existing, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"})
 	if err != nil {
 		t.Fatalf("ReadExistingStatus() error = %v", err)
 	}
@@ -135,7 +136,7 @@ func TestReadExistingStatusHeaderOnly(t *testing.T) {
 
 	client := newTestClient(t, valuesHandler(t, values))
 
-	existing, err := client.ReadExistingStatus("sheet-id", "Results!A1")
+	existing, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"})
 	if err != nil {
 		t.Fatalf("ReadExistingStatus() error = %v", err)
 	}
@@ -155,7 +156,7 @@ func TestReadExistingStatusSkipsRowsWithoutAUsableStatus(t *testing.T) {
 
 	client := newTestClient(t, valuesHandler(t, values))
 
-	existing, err := client.ReadExistingStatus("sheet-id", "Results!A1")
+	existing, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"})
 	if err != nil {
 		t.Fatalf("ReadExistingStatus() error = %v", err)
 	}
@@ -173,7 +174,7 @@ func TestReadExistingStatusToleratesShortRows(t *testing.T) {
 
 	client := newTestClient(t, valuesHandler(t, values))
 
-	existing, err := client.ReadExistingStatus("sheet-id", "Results!A1")
+	existing, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"})
 	if err != nil {
 		t.Fatalf("ReadExistingStatus() error = %v", err)
 	}
@@ -200,7 +201,7 @@ func TestReadExistingStatusKeysISBN10AsISBN13(t *testing.T) {
 
 	client := newTestClient(t, valuesHandler(t, values))
 
-	existing, err := client.ReadExistingStatus("sheet-id", "Results!A1")
+	existing, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"})
 	if err != nil {
 		t.Fatalf("ReadExistingStatus() error = %v", err)
 	}
@@ -222,7 +223,7 @@ func TestReadExistingStatusMissingTabIsNotAnError(t *testing.T) {
 		}
 	})
 
-	existing, err := client.ReadExistingStatus("sheet-id", "Results!A1")
+	existing, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"})
 	if err != nil {
 		t.Fatalf("ReadExistingStatus() error = %v, want nil", err)
 	}
@@ -243,7 +244,7 @@ func TestReadExistingStatusPropagatesRealErrors(t *testing.T) {
 		}
 	})
 
-	if _, err := client.ReadExistingStatus("sheet-id", "Results!A1"); err == nil {
+	if _, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"}); err == nil {
 		t.Fatal("ReadExistingStatus() error = nil, want a permission error")
 	}
 }
@@ -282,9 +283,93 @@ func TestReadExistingStatusRejectsUnparseableRange(t *testing.T) {
 		t.Error("Sheets API called despite an invalid range")
 	})
 
-	if _, err := client.ReadExistingStatus("sheet-id", "not a range"); err == nil {
+	if _, err := client.ReadExistingStatus(WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "not a range"}); err == nil {
 		t.Fatal("ReadExistingStatus() error = nil, want an invalid-range error")
 	}
+}
+
+// TestReadAndWriteResolveTheSameOutputRange is what keeps the sheet cache
+// pointed at the sheet the results are actually in.
+//
+// --create-new-tab redirects the write to a tab the configured output range
+// never names. A reader that took OutputRange at face value would read a
+// different tab: the sheet cache would silently never hit, or — if that other
+// tab happened to carry a Status column — would hit on rows for a different
+// data set entirely. Both sides therefore derive their range from one rule, and
+// this test drives both against a live handler rather than testing that rule in
+// isolation, so a caller that forgets to apply it still fails.
+func TestReadAndWriteResolveTheSameOutputRange(t *testing.T) {
+	tests := []struct {
+		name   string
+		config WriteConfig
+	}{
+		{
+			name:   "New tab with no output range",
+			config: WriteConfig{SpreadsheetID: "sheet-id", CreateNewTab: "Results"},
+		},
+		{
+			name:   "New tab with a bare anchor",
+			config: WriteConfig{SpreadsheetID: "sheet-id", CreateNewTab: "Results", OutputRange: "B1"},
+		},
+		{
+			name:   "New tab with an already-qualified range",
+			config: WriteConfig{SpreadsheetID: "sheet-id", CreateNewTab: "Results", OutputRange: "Other!C3"},
+		},
+		{
+			name:   "No new tab and no output range",
+			config: WriteConfig{SpreadsheetID: "sheet-id"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var written, read string
+
+			client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+
+				switch r.Method {
+				case http.MethodPut:
+					written = rangeFromPath(r.URL.Path)
+					w.Write([]byte(`{}`))
+				case http.MethodGet:
+					read = rangeFromPath(r.URL.Path)
+					json.NewEncoder(w).Encode(&sheetsapi.ValueRange{MajorDimension: "ROWS"})
+				default:
+					// The tab creation batchUpdate.
+					w.Write([]byte(`{}`))
+				}
+			})
+
+			if err := client.WriteResults(tt.config, nil, nil); err != nil {
+				t.Fatalf("WriteResults() error = %v", err)
+			}
+			if _, err := client.ReadExistingStatus(tt.config); err != nil {
+				t.Fatalf("ReadExistingStatus() error = %v", err)
+			}
+
+			// The read range is the write range widened to span every written
+			// column — an anchor read back verbatim would return one cell — so
+			// agreement means the read covers exactly what the write targets.
+			want, err := outputReadRange(written)
+			if err != nil {
+				t.Fatalf("outputReadRange(%q) error = %v", written, err)
+			}
+			if read != want {
+				t.Errorf("read range = %q, want %q (write range %q)", read, want, written)
+			}
+		})
+	}
+}
+
+// rangeFromPath pulls the A1 range out of a Sheets values request path,
+// ".../values/<range>".
+func rangeFromPath(path string) string {
+	_, rangeStr, found := strings.Cut(path, "/values/")
+	if !found {
+		return ""
+	}
+	return rangeStr
 }
 
 func keysOf(m map[string]ExistingRow) []string {
