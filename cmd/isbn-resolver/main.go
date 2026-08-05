@@ -23,7 +23,11 @@ func main() {
 	flag.Parse()
 	flags.harvest()
 
-	cfg := flags.resolveConfig()
+	cfg, err := flags.resolveConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Reject unusable values before any work starts. A config file is free to
 	// say "concurrency": 0, and nothing downstream would complain — the run
@@ -269,32 +273,25 @@ func (c *cliFlags) applyTo(dst *config.Config) {
 //
 // Flags sit on top because they are the most specific statement of intent a
 // user can make: they describe this one invocation, while a config file or an
-// exported variable describes every invocation. A failure to read the config
-// file is a warning rather than a fatal error, preserving the previous
-// behaviour of falling back to defaults.
-func (c *cliFlags) resolveConfig() *config.Config {
+// exported variable describes every invocation. An explicitly-passed --config
+// that cannot be read is fatal rather than a warning: the flag is only ever
+// present because the user asked for that specific file, so silently running
+// on defaults would mask a typo'd path behind what looks like a normal run.
+func (c *cliFlags) resolveConfig() (*config.Config, error) {
 	cfg := config.DefaultConfig()
 
-	var loadErr error
 	if c.cfg.ConfigFile != "" {
 		fileCfg, err := config.LoadFromFile(c.cfg.ConfigFile)
-		if err == nil {
-			cfg = fileCfg
-		} else {
-			loadErr = err
+		if err != nil {
+			return nil, fmt.Errorf("reading config file %q: %w", c.cfg.ConfigFile, err)
 		}
+		cfg = fileCfg
 	}
 
 	cfg.LoadFromEnv()
 	c.applyTo(cfg)
 
-	// Warn only after the merge, so --verbose (or ISBN_VERBOSE) is honoured
-	// even though the file that might also have set it failed to load.
-	if loadErr != nil && cfg.Verbose {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to load config file: %v\n", loadErr)
-	}
-
-	return cfg
+	return cfg, nil
 }
 
 // resolveCacheMode collapses the three cache-control settings into the single

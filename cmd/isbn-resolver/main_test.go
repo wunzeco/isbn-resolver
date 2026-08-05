@@ -148,7 +148,11 @@ func TestResolveConfigPrecedence(t *testing.T) {
 			path := writeConfigFile(t, fileContents)
 			args := append([]string{"--config", path}, tt.args...)
 
-			tt.check(t, parseArgs(t, args...).resolveConfig())
+			cfg, err := parseArgs(t, args...).resolveConfig()
+			if err != nil {
+				t.Fatalf("resolveConfig() error = %v", err)
+			}
+			tt.check(t, cfg)
 		})
 	}
 }
@@ -157,7 +161,10 @@ func TestResolveConfigPrecedence(t *testing.T) {
 // must still show through and flags must still win over the environment.
 func TestResolveConfigWithoutFile(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
-		cfg := parseArgs(t).resolveConfig()
+		cfg, err := parseArgs(t).resolveConfig()
+		if err != nil {
+			t.Fatalf("resolveConfig() error = %v", err)
+		}
 
 		assertDuration(t, "timeout", cfg.Timeout, 30*time.Second)
 		if cfg.Concurrency != config.DefaultConcurrency {
@@ -173,7 +180,10 @@ func TestResolveConfigWithoutFile(t *testing.T) {
 
 	t.Run("flag beats env", func(t *testing.T) {
 		t.Setenv("ISBN_FORMAT", "json")
-		cfg := parseArgs(t, "--format", "csv").resolveConfig()
+		cfg, err := parseArgs(t, "--format", "csv").resolveConfig()
+		if err != nil {
+			t.Fatalf("resolveConfig() error = %v", err)
+		}
 
 		if cfg.Format != output.FormatCSV {
 			t.Errorf("format = %q, want csv", cfg.Format)
@@ -181,16 +191,23 @@ func TestResolveConfigWithoutFile(t *testing.T) {
 	})
 }
 
-// TestResolveConfigUnreadableFileFallsBackToDefaults keeps an unreadable
-// --config a warning rather than a hard failure, as it was before the
-// precedence rework: the run continues on defaults plus whatever else was set.
-func TestResolveConfigUnreadableFileFallsBackToDefaults(t *testing.T) {
+// TestResolveConfigUnreadableFileFails makes an explicitly-passed --config
+// that cannot be read a hard failure rather than a warning: the flag only
+// exists because the user asked for that specific file, so falling back to
+// defaults would silently run with the wrong settings instead of surfacing
+// the typo'd path.
+func TestResolveConfigUnreadableFileFails(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
-	cfg := parseArgs(t, "--config", missing, "--concurrency", "7").resolveConfig()
+	cfg, err := parseArgs(t, "--config", missing, "--concurrency", "7").resolveConfig()
 
-	assertDuration(t, "timeout", cfg.Timeout, 30*time.Second)
-	if cfg.Concurrency != 7 {
-		t.Errorf("concurrency = %d, want 7 (from flag)", cfg.Concurrency)
+	if err == nil {
+		t.Fatal("resolveConfig() error = nil, want an error for an unreadable --config file")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("resolveConfig() error = %q, want it to name the path %q", err.Error(), missing)
+	}
+	if cfg != nil {
+		t.Errorf("resolveConfig() cfg = %+v, want nil on error", cfg)
 	}
 }
 
@@ -202,7 +219,10 @@ func TestResolveConfigValidation(t *testing.T) {
 	badFile := writeConfigFile(t, `{"concurrency": 0}`)
 
 	t.Run("bad file value is rejected", func(t *testing.T) {
-		cfg := parseArgs(t, "--config", badFile).resolveConfig()
+		cfg, err := parseArgs(t, "--config", badFile).resolveConfig()
+		if err != nil {
+			t.Fatalf("resolveConfig() error = %v", err)
+		}
 
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("Validate() = nil for a config file with concurrency 0, want an error")
@@ -210,7 +230,10 @@ func TestResolveConfigValidation(t *testing.T) {
 	})
 
 	t.Run("flag overrides the bad file value", func(t *testing.T) {
-		cfg := parseArgs(t, "--config", badFile, "--concurrency", "4").resolveConfig()
+		cfg, err := parseArgs(t, "--config", badFile, "--concurrency", "4").resolveConfig()
+		if err != nil {
+			t.Fatalf("resolveConfig() error = %v", err)
+		}
 
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("Validate() = %v, want nil once --concurrency overrides the file", err)
@@ -218,7 +241,10 @@ func TestResolveConfigValidation(t *testing.T) {
 	})
 
 	t.Run("bad flag value is rejected", func(t *testing.T) {
-		cfg := parseArgs(t, "--concurrency", "0").resolveConfig()
+		cfg, err := parseArgs(t, "--concurrency", "0").resolveConfig()
+		if err != nil {
+			t.Fatalf("resolveConfig() error = %v", err)
+		}
 
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("Validate() = nil for --concurrency 0, want an error")
