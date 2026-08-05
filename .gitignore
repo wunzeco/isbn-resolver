@@ -42,3 +42,10 @@ PROGRESS.md
 .ralph/
 PROMPT_plan.md
 PROMPT_build.md
+
+# Local Claude Code settings/state (machine-specific, not shared project config)
+.claude/
+
+# Standalone note about a bug in the external `ralph` CLI tool, not part of
+# this project's source or docs
+/ralph-getopt-bug-report.md
