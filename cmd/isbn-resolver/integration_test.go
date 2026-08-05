@@ -1,19 +1,25 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/wunzeco/isbn-resolver/pkg/cache"
 	"github.com/wunzeco/isbn-resolver/pkg/resolver"
+	"github.com/wunzeco/isbn-resolver/pkg/sheets"
+	"google.golang.org/api/option"
+	sheetsapi "google.golang.org/api/sheets/v4"
 )
 
 // newIntegrationClient stands up a real Open Library server (Google Books
@@ -257,5 +263,276 @@ func TestIntegrationRateLimitWarningReachesProgressOutput(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("progress output = %q, want it to contain %q", got, want)
 		}
+	}
+}
+
+// fakeSheetsAPI is an httptest-backed stand-in for the Sheets API that keeps
+// whatever WriteResults last wrote and serves it back to ReadExistingStatus.
+//
+// It stores rows rather than asserting on them because the assertion that
+// matters is behavioural: the second run must not call the resolver. Serving
+// back the writer's own output — rather than hand-authored rows, which is all
+// the unit tests in main_test.go can do — is what makes the round trip real,
+// so the nine columns the writer encodes and the reader decodes cannot drift
+// apart unnoticed.
+type fakeSheetsAPI struct {
+	mu     sync.Mutex
+	values [][]interface{}
+}
+
+func (f *fakeSheetsAPI) put(values [][]interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.values = values
+}
+
+func (f *fakeSheetsAPI) get() [][]interface{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.values
+}
+
+func newFakeSheetsAPI(t *testing.T) *sheets.Client {
+	t.Helper()
+
+	fake := &fakeSheetsAPI{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.Method {
+		case http.MethodPut: // Values.Update, i.e. WriteResults.
+			var body sheetsapi.ValueRange
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decoding write body: %v", err)
+			}
+			fake.put(body.Values)
+			w.Write([]byte(`{}`))
+		case http.MethodGet: // Values.Get, i.e. ReadExistingStatus.
+			json.NewEncoder(w).Encode(&sheetsapi.ValueRange{
+				MajorDimension: "ROWS",
+				Values:         fake.get(),
+			})
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	ctx := context.Background()
+	service, err := sheetsapi.NewService(ctx,
+		option.WithEndpoint(server.URL),
+		option.WithoutAuthentication(),
+	)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	return sheets.NewClient(ctx, service)
+}
+
+// resolverRequests counts outbound resolver requests per ISBN. Per-ISBN rather
+// than a single total because "which ISBNs cost a network call" is the actual
+// claim under test — a total alone cannot tell a skipped success from a
+// re-attempted failure.
+type resolverRequests struct {
+	mu     sync.Mutex
+	byISBN map[string]int
+}
+
+func (r *resolverRequests) record(isbnStr string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byISBN == nil {
+		r.byISBN = make(map[string]int)
+	}
+	r.byISBN[isbnStr]++
+}
+
+// requested returns the ISBNs that cost at least one request since the last
+// reset. The count itself is not asserted on: an unresolvable ISBN costs one
+// request per tier, and pinning that number would make the test a statement
+// about the fallback chain's length rather than about the cache.
+func (r *resolverRequests) requested() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	isbns := make([]string, 0, len(r.byISBN))
+	for isbnStr := range r.byISBN {
+		isbns = append(isbns, isbnStr)
+	}
+	sort.Strings(isbns)
+
+	return isbns
+}
+
+// sorted matches requested()'s ordering, so an expectation can be written in
+// whatever order reads best at the call site.
+func sorted(isbns ...string) []string {
+	sort.Strings(isbns)
+	return isbns
+}
+
+func (r *resolverRequests) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.byISBN = nil
+}
+
+// newCountingResolverAPI stands up both upstreams. Only resolvable answers;
+// every other ISBN is a genuine catalog miss in both tiers, which is what
+// produces an Error row in the sheet for the retry-failed case below.
+func newCountingResolverAPI(t *testing.T, resolvable string) (*resolver.APIClient, *resolverRequests) {
+	t.Helper()
+
+	requests := &resolverRequests{}
+
+	openLibrary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isbnStr := strings.TrimPrefix(r.URL.Query().Get("bibkeys"), "ISBN:")
+		requests.record(isbnStr)
+
+		w.Header().Set("Content-Type", "application/json")
+		if isbnStr != resolvable {
+			// An empty body is Open Library's "no record".
+			json.NewEncoder(w).Encode(map[string]interface{}{})
+			return
+		}
+
+		// A full record, so the round trip through the sheet's nine columns is
+		// exercised on every field the writer emits rather than on a title
+		// alone.
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ISBN:" + isbnStr: map[string]interface{}{
+				"title":           "The Go Programming Language",
+				"authors":         []map[string]interface{}{{"name": "Alan A. A. Donovan"}, {"name": "Brian W. Kernighan"}},
+				"publishers":      []map[string]interface{}{{"name": "Addison-Wesley"}},
+				"publish_date":    "2015-11-16",
+				"number_of_pages": 380,
+				"subjects":        []map[string]interface{}{{"name": "Computers"}, {"name": "Programming"}},
+			},
+		})
+	}))
+	t.Cleanup(openLibrary.Close)
+
+	googleBooks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.record(strings.TrimPrefix(r.URL.Query().Get("q"), "isbn:"))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"totalItems": 0})
+	}))
+	t.Cleanup(googleBooks.Close)
+
+	client := resolver.NewAPIClient(5 * time.Second)
+	client.OpenLibraryBaseURL = openLibrary.URL
+	client.GoogleBooksBaseURL = googleBooks.URL
+
+	return client, requests
+}
+
+// sheetCarriedFields narrows a result to the part the nine output columns can
+// carry, for comparing a freshly-resolved run against one served from the
+// sheet.
+//
+// ISBN13 is deliberately excluded: the writer stores the original ISBN in the
+// ISBN-13 column when no ISBN-13 was resolved, so a row that round-trips comes
+// back with ISBN13 populated where the cold run left it empty. That is the
+// writer's documented behaviour, not a cache defect, and asserting on the whole
+// struct would make this test fail for it.
+func sheetCarriedFields(m resolver.BookMetadata) resolver.BookMetadata {
+	return resolver.BookMetadata{
+		ISBN:            m.ISBN,
+		Title:           m.Title,
+		Authors:         m.Authors,
+		Publisher:       m.Publisher,
+		PublicationDate: m.PublicationDate,
+		Pages:           m.Pages,
+		Categories:      m.Categories,
+	}
+}
+
+// TestIntegrationSheetCacheSecondRunMakesZeroResolverRequests is
+// specs/deferred-cache-features.md §1's "Integration Tests" requirement: a
+// second run with --sheet-cache and no local cache file makes zero resolver
+// calls for rows the sheet already marks Success.
+//
+// It is the only test that drives the feature end to end — a real Sheets API
+// over HTTP, the real writer and reader, the real resolver over HTTP — and so
+// the only one that can catch the failure mode the unit tests structurally
+// cannot: the writer and the sheet-cache reader disagreeing about the column
+// layout, which would leave the cache silently never hitting while every unit
+// test still passed.
+//
+// Each run loads a cache file that does not exist, the way a fresh CI checkout
+// does, so anything skipped is skipped because of the sheet and nothing else.
+func TestIntegrationSheetCacheSecondRunMakesZeroResolverRequests(t *testing.T) {
+	const (
+		resolvable   = "9780134190440"
+		unresolvable = "9780132350884"
+	)
+	isbns := []string{resolvable, unresolvable}
+
+	client, requests := newCountingResolverAPI(t, resolvable)
+	sheetClient := newFakeSheetsAPI(t)
+	writeConfig := sheets.WriteConfig{SpreadsheetID: "sheet-id", OutputRange: "Results!A1"}
+
+	run := func(mode cache.Mode) ([]resolver.BookMetadata, cache.Counters) {
+		t.Helper()
+
+		local, err := cache.Load(filepath.Join(t.TempDir(), "cache.json"))
+		if err != nil {
+			t.Fatalf("loading absent cache file: %v", err)
+		}
+
+		rows, err := sheetClient.ReadExistingStatus(writeConfig)
+		if err != nil {
+			t.Fatalf("ReadExistingStatus() error = %v", err)
+		}
+
+		policy := cache.NewPolicy(mergeSheetCache(local, rows), mode)
+		results, failures := resolveISBNs(4, isbns, client, local, policy, io.Discard)
+
+		if err := sheetClient.WriteResults(writeConfig, results, failures); err != nil {
+			t.Fatalf("WriteResults() error = %v", err)
+		}
+
+		return results, policy.Counters()
+	}
+
+	cold, coldCounters := run(cache.ModeNormal)
+	if got, want := requests.requested(), sorted(resolvable, unresolvable); !reflect.DeepEqual(got, want) {
+		t.Fatalf("cold run requested %v, want %v", got, want)
+	}
+	if coldCounters.Misses != len(isbns) {
+		t.Fatalf("cold run counters = %+v, want %d misses", coldCounters, len(isbns))
+	}
+	if cold[0].Title == "" {
+		t.Fatal("cold run did not resolve the resolvable ISBN")
+	}
+
+	requests.reset()
+	warm, warmCounters := run(cache.ModeNormal)
+
+	if got := requests.requested(); len(got) != 0 {
+		t.Errorf("warm run requested %v, want none — the sheet already holds both rows", got)
+	}
+	if warmCounters.Hits != len(isbns) {
+		t.Errorf("warm run counters = %+v, want %d hits", warmCounters, len(isbns))
+	}
+	for i := range isbns {
+		if got, want := sheetCarriedFields(warm[i]), sheetCarriedFields(cold[i]); !reflect.DeepEqual(got, want) {
+			t.Errorf("row %d served from the sheet = %+v, want %+v", i, got, want)
+		}
+	}
+
+	// --retry-failed has to mean the same thing for the sheet cache as for the
+	// local one, and the Error column is the only place the sheet records that
+	// an ISBN failed — so this is what proves an error row round-trips as an
+	// error rather than as an unusable blank.
+	requests.reset()
+	if _, counters := run(cache.ModeRetryFailed); counters.Hits != 1 || counters.Retried != 1 {
+		t.Errorf("--retry-failed counters = %+v, want 1 hit and 1 retried", counters)
+	}
+	if got, want := requests.requested(), sorted(unresolvable); !reflect.DeepEqual(got, want) {
+		t.Errorf("--retry-failed requested %v, want %v", got, want)
 	}
 }
