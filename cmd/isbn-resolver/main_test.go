@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -696,7 +698,7 @@ func TestResolveCacheMode(t *testing.T) {
 // since elapsed time is inherently non-deterministic.
 func TestPrintSummaryIncludesDuration(t *testing.T) {
 	var buf strings.Builder
-	printSummary(&buf, 848, 4, 852, 9200*time.Millisecond)
+	printSummary(&buf, output.Summary{Total: 852, Successful: 848, Failed: 4}, 9200*time.Millisecond)
 
 	got := buf.String()
 
@@ -713,6 +715,69 @@ func TestPrintSummaryIncludesDuration(t *testing.T) {
 	// Duration must follow Summary, matching the spec's ordering.
 	if strings.Index(got, wantSummary) > strings.Index(got, wantDuration) {
 		t.Errorf("printSummary() output = %q, want Summary before Duration", got)
+	}
+}
+
+// TestSummariesAgreeOnADuplicatedFailure is the regression test for the two
+// disagreeing run summaries: on examples/ISBNs.csv, stderr reported "466
+// successful, 22 failed out of 488" while the JSON summary of the same run
+// reported 465/23/488. The cause was the verbose line deriving its counts as
+// len(validISBNs)-len(errors) — rows minus *unique failing ISBNs* — while the
+// JSON block counted rows on both sides. 9781801042062 is both duplicated in
+// that sample and unresolvable, so it was one row of the difference.
+//
+// The input below reproduces that shape in miniature: three rows, one ISBN
+// listed twice and failing. Both summaries must call that two failed rows out
+// of three, not one out of three.
+func TestSummariesAgreeOnADuplicatedFailure(t *testing.T) {
+	failing := "9780132350884"
+	isbns := []string{"9780134190440", failing, failing}
+
+	client := &countingResolver{fail: map[string]bool{failing: true}}
+	store := cache.New()
+	policy := cache.NewPolicy(store, cache.ModeNoCache)
+	results, failures := resolveISBNs(4, isbns, client, store, policy, io.Discard)
+
+	// The premise of the test: one map entry, two failing rows. Without this
+	// the test could pass on an input that never exercised the discrepancy.
+	if len(failures) != 1 {
+		t.Fatalf("failures = %v, want a single entry for the duplicated ISBN", failures)
+	}
+
+	summary := output.Summarize(results, failures)
+	want := output.Summary{Total: 3, Successful: 1, Failed: 2}
+	if summary != want {
+		t.Errorf("Summarize() = %+v, want %+v", summary, want)
+	}
+
+	var verbose strings.Builder
+	printSummary(&verbose, summary, time.Second)
+
+	var fromVerbose output.Summary
+	line := strings.TrimSpace(verbose.String())
+	if _, err := fmt.Sscanf(line, "Summary: %d successful, %d failed out of %d total",
+		&fromVerbose.Successful, &fromVerbose.Failed, &fromVerbose.Total); err != nil {
+		t.Fatalf("parsing verbose summary %q: %v", line, err)
+	}
+
+	var buf bytes.Buffer
+	if err := output.NewFormatter(output.FormatJSON, &buf).FormatBatch(results, failures); err != nil {
+		t.Fatalf("FormatBatch() error = %v", err)
+	}
+
+	var decoded struct {
+		Summary output.Summary `json:"summary"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("decoding JSON output %q: %v", buf.String(), err)
+	}
+
+	if fromVerbose != decoded.Summary {
+		t.Errorf("verbose summary %+v disagrees with the JSON summary %+v for the same run",
+			fromVerbose, decoded.Summary)
+	}
+	if fromVerbose != want {
+		t.Errorf("verbose summary = %+v, want %+v", fromVerbose, want)
 	}
 }
 

@@ -3,6 +3,7 @@ package output
 import (
 	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -49,6 +50,118 @@ func TestFormatText(t *testing.T) {
 		if !strings.Contains(output, field) {
 			t.Errorf("Output missing field: %s", field)
 		}
+	}
+}
+
+// TestSummarize pins the counting rule the whole run reports against: rows,
+// not unique ISBNs. The errors map is keyed by ISBN, so a duplicated failing
+// ISBN holds one entry while occupying two output rows — len(results) minus
+// len(errors) therefore over-counts successes, which is exactly how the
+// verbose summary and the JSON summary came to disagree about the same run.
+func TestSummarize(t *testing.T) {
+	rows := func(isbns ...string) []resolver.BookMetadata {
+		results := make([]resolver.BookMetadata, 0, len(isbns))
+		for _, isbnStr := range isbns {
+			results = append(results, resolver.BookMetadata{ISBN: isbnStr})
+		}
+
+		return results
+	}
+
+	failures := func(isbns ...string) map[string]error {
+		errs := make(map[string]error, len(isbns))
+		for _, isbnStr := range isbns {
+			errs[isbnStr] = fmt.Errorf("no data found for ISBN")
+		}
+
+		return errs
+	}
+
+	tests := []struct {
+		name    string
+		results []resolver.BookMetadata
+		errors  map[string]error
+		want    Summary
+	}{
+		{
+			name:    "all successful",
+			results: rows("9780134190440", "9780132350884"),
+			errors:  failures(),
+			want:    Summary{Total: 2, Successful: 2, Failed: 0},
+		},
+		{
+			name:    "a duplicated failing ISBN counts once per row",
+			results: rows("9780134190440", "9780132350884", "9780132350884"),
+			errors:  failures("9780132350884"),
+			want:    Summary{Total: 3, Successful: 1, Failed: 2},
+		},
+		{
+			name:    "a duplicated succeeding ISBN counts once per row",
+			results: rows("9780134190440", "9780134190440"),
+			errors:  failures(),
+			want:    Summary{Total: 2, Successful: 2, Failed: 0},
+		},
+		{
+			name:    "no results",
+			results: nil,
+			errors:  failures(),
+			want:    Summary{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Summarize(tt.results, tt.errors); got != tt.want {
+				t.Errorf("Summarize() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatJSONSummaryMatchesSummarize keeps the JSON block and the exported
+// tally from drifting apart: the block is what a downstream consumer reads,
+// Summarize is what the verbose line prints.
+func TestFormatJSONSummaryMatchesSummarize(t *testing.T) {
+	results := []resolver.BookMetadata{
+		{ISBN: "9780134190440", Title: "The Go Programming Language"},
+		{ISBN: "9780132350884"},
+		{ISBN: "9780132350884"},
+	}
+	errors := map[string]error{"9780132350884": fmt.Errorf("no data found for ISBN")}
+
+	buf := &bytes.Buffer{}
+	if err := NewFormatter(FormatJSON, buf).FormatBatch(results, errors); err != nil {
+		t.Fatalf("FormatBatch failed: %v", err)
+	}
+
+	var decoded struct {
+		Results []struct {
+			Status string `json:"status"`
+		} `json:"results"`
+		Summary Summary `json:"summary"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("decoding %q: %v", buf.String(), err)
+	}
+
+	if want := Summarize(results, errors); decoded.Summary != want {
+		t.Errorf("JSON summary = %+v, want %+v", decoded.Summary, want)
+	}
+
+	// The summary must also match the rows actually emitted, which is the
+	// property a reader of the JSON checks it against.
+	if len(decoded.Results) != decoded.Summary.Total {
+		t.Errorf("JSON has %d result rows but reports total %d", len(decoded.Results), decoded.Summary.Total)
+	}
+
+	var failed int
+	for _, entry := range decoded.Results {
+		if entry.Status == "error" {
+			failed++
+		}
+	}
+	if failed != decoded.Summary.Failed {
+		t.Errorf("JSON has %d error rows but reports %d failed", failed, decoded.Summary.Failed)
 	}
 }
 

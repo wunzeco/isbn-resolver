@@ -93,6 +93,42 @@ func (f *Formatter) formatText(metadata *resolver.BookMetadata, err error) error
 	return err
 }
 
+// Summary is the outcome tally for a whole run: the block the JSON output
+// carries and the verbose "Summary: ..." line prints.
+type Summary struct {
+	Total      int `json:"total"`
+	Successful int `json:"successful"`
+	Failed     int `json:"failed"`
+}
+
+// Summarize counts a run's outcome from the same two values every output path
+// already holds, so the verbose summary and the JSON summary cannot disagree.
+//
+// The count is deliberately *row-wise* — one tally per entry in results, not
+// per unique ISBN. Callers used to derive the verbose line as
+// len(validISBNs)-len(errors), which mixes the two: results has one entry per
+// input row, while errors is keyed by ISBN, so an ISBN that appears twice in
+// the input and fails contributes two failing rows but only one map entry. On
+// examples/ISBNs.csv that made stderr report 466/22 against the JSON's
+// 465/23/488 for the same run. Row-wise is the defensible reading — total has
+// always been the row count, and a user who listed an ISBN twice gets two
+// output rows for it — so the map's key set is not a count of anything the
+// output shows.
+func Summarize(results []resolver.BookMetadata, errors map[string]error) Summary {
+	summary := Summary{Total: len(results)}
+
+	for _, metadata := range results {
+		if _, failed := errors[metadata.ISBN]; failed {
+			summary.Failed++
+			continue
+		}
+
+		summary.Successful++
+	}
+
+	return summary
+}
+
 // FormatBatch formats multiple results
 func (f *Formatter) FormatBatch(results []resolver.BookMetadata, errors map[string]error) error {
 	switch f.format {
@@ -116,12 +152,8 @@ func (f *Formatter) formatJSON(results []resolver.BookMetadata, errors map[strin
 
 	output := struct {
 		Results []resultEntry `json:"results"`
-		Summary struct {
-			Total      int `json:"total"`
-			Successful int `json:"successful"`
-			Failed     int `json:"failed"`
-		} `json:"summary"`
-	}{}
+		Summary Summary       `json:"summary"`
+	}{Summary: Summarize(results, errors)}
 
 	for _, metadata := range results {
 		entry := resultEntry{
@@ -131,17 +163,13 @@ func (f *Formatter) formatJSON(results []resolver.BookMetadata, errors map[strin
 		if err, hasError := errors[metadata.ISBN]; hasError {
 			entry.Status = "error"
 			entry.Error = err.Error()
-			output.Summary.Failed++
 		} else {
 			entry.Status = "success"
 			entry.Data = &metadata
-			output.Summary.Successful++
 		}
 
 		output.Results = append(output.Results, entry)
 	}
-
-	output.Summary.Total = len(results)
 
 	encoder := json.NewEncoder(f.writer)
 	encoder.SetIndent("", "  ")

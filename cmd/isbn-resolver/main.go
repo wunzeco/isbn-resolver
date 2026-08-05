@@ -135,15 +135,21 @@ func main() {
 		}
 	}
 
+	// One tally, computed once from the results themselves, feeds every place
+	// this run reports counts — the Sheets confirmation, the JSON summary block
+	// and the verbose line. Deriving it separately per output path is what let
+	// stderr and the JSON summary disagree about the same run.
+	summary := output.Summarize(results, errors)
+
 	// Write to Google Sheets if configured
 	if cfg.SheetsURL != "" || cfg.SheetsID != "" {
-		if err := writeToSheets(cfg, results, errors); err != nil {
+		if err := writeToSheets(cfg, results, errors, summary); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing to Google Sheets: %v\n", err)
 			os.Exit(1)
 		}
 
 		if cfg.Verbose {
-			printSummary(os.Stderr, len(validISBNs)-len(errors), len(errors), len(validISBNs), time.Since(start))
+			printSummary(os.Stderr, summary, time.Since(start))
 		}
 		return
 	}
@@ -169,7 +175,7 @@ func main() {
 
 	// Print summary in verbose mode
 	if cfg.Verbose {
-		printSummary(os.Stderr, len(validISBNs)-len(errors), len(errors), len(validISBNs), time.Since(start))
+		printSummary(os.Stderr, summary, time.Since(start))
 	}
 }
 
@@ -177,8 +183,14 @@ func main() {
 // (spec §"Expected Output (Verbose Mode)") to w. Both the Google Sheets output
 // path and the stdout formatting path print an identical block, so it lives
 // here once rather than twice in main.
-func printSummary(w io.Writer, successful, failed, total int, elapsed time.Duration) {
-	fmt.Fprintf(w, "\nSummary: %d successful, %d failed out of %d total\n", successful, failed, total)
+//
+// It takes the whole output.Summary rather than three ints so that the counts
+// it prints are necessarily the counts the JSON output carries; the previous
+// signature let a caller assemble a triple of its own, which is how stderr came
+// to report a different failure count from the same run's JSON.
+func printSummary(w io.Writer, summary output.Summary, elapsed time.Duration) {
+	fmt.Fprintf(w, "\nSummary: %d successful, %d failed out of %d total\n",
+		summary.Successful, summary.Failed, summary.Total)
 	fmt.Fprintf(w, "Duration: %s\n", elapsed)
 }
 
@@ -852,8 +864,10 @@ func getISBNsFromSheets(cfg *config.Config) ([]string, error) {
 	return isbns, nil
 }
 
-// writeToSheets writes results to Google Sheets
-func writeToSheets(cfg *config.Config, results []resolver.BookMetadata, errors map[string]error) error {
+// writeToSheets writes results to Google Sheets. The summary is passed in
+// rather than re-derived so its confirmation line agrees with the "Summary:"
+// block printed moments later by the same run.
+func writeToSheets(cfg *config.Config, results []resolver.BookMetadata, errors map[string]error, summary output.Summary) error {
 	ctx := context.Background()
 
 	if cfg.Verbose && !cfg.SheetsDryRun {
@@ -885,10 +899,9 @@ func writeToSheets(cfg *config.Config, results []resolver.BookMetadata, errors m
 	}
 
 	if cfg.Verbose && !cfg.SheetsDryRun {
-		successful := len(results) - len(errors)
-		fmt.Fprintf(os.Stderr, "✓ Successfully wrote %d results\n", successful)
-		if len(errors) > 0 {
-			fmt.Fprintf(os.Stderr, "⚠ %d ISBNs failed to resolve\n", len(errors))
+		fmt.Fprintf(os.Stderr, "✓ Successfully wrote %d results\n", summary.Successful)
+		if summary.Failed > 0 {
+			fmt.Fprintf(os.Stderr, "⚠ %d ISBNs failed to resolve\n", summary.Failed)
 		}
 	}
 
