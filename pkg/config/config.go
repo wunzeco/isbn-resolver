@@ -159,6 +159,14 @@ func (c *Config) Validate() error {
 			time.Duration(c.RateLimit.BaseBackoff))
 	}
 
+	// A negative timeout expires before the request is even sent, and zero
+	// disables http.Client's deadline entirely (net/http's "no timeout"
+	// sentinel) — neither is something a config file should be able to
+	// request without a clear error naming the value.
+	if c.Timeout <= 0 {
+		return fmt.Errorf("invalid timeout %s: must be positive", time.Duration(c.Timeout))
+	}
+
 	return nil
 }
 

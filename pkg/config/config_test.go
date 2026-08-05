@@ -218,6 +218,18 @@ func TestValidate(t *testing.T) {
 			mutate:    func(c *Config) { c.RateLimit.BaseBackoff = Duration(-time.Second) },
 			wantError: "invalid rate_limit.base_backoff -1s: must not be negative",
 		},
+		{
+			name:      "negative timeout",
+			mutate:    func(c *Config) { c.Timeout = Duration(-time.Second) },
+			wantError: "invalid timeout -1s: must be positive",
+		},
+		{
+			// net/http treats a zero Timeout as "no timeout at all", which a
+			// config file should never be able to request silently.
+			name:      "zero timeout",
+			mutate:    func(c *Config) { c.Timeout = 0 },
+			wantError: "invalid timeout 0s: must be positive",
+		},
 	}
 
 	for _, tt := range tests {
