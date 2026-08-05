@@ -8,6 +8,15 @@ import (
 	"google.golang.org/api/sheets/v4"
 )
 
+// defaultOutputRange is where results land when no output range is configured.
+// ReadExistingStatus reads from the same default, so the sheet cache always
+// looks at whatever WriteResults last wrote.
+const defaultOutputRange = "B1"
+
+// outputColumns is the number of columns formatResultsForSheet emits. Shared
+// with ReadExistingStatus, which has to read them all back.
+const outputColumns = 9
+
 // WriteConfig holds configuration for writing results
 type WriteConfig struct {
 	SpreadsheetID string
@@ -42,7 +51,7 @@ func (c *Client) WriteResults(config WriteConfig, results []resolver.BookMetadat
 	writeRange := config.OutputRange
 	if writeRange == "" {
 		// Default to writing next to the input column
-		writeRange = "B1"
+		writeRange = defaultOutputRange
 	}
 
 	// Prepare the update request
