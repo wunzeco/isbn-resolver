@@ -210,6 +210,72 @@ func TestResolveConfigEmptyCacheFileFallsBackToDefault(t *testing.T) {
 	}
 }
 
+// TestSheetCacheFlagPrecedence covers the sheet cache's two settings paths
+// meeting: a config file that turns it on (the CI case — the flag lives in a
+// checked-in file, not on the command line) and a command line that turns
+// caching off for one run.
+//
+// --no-cache winning is the point: it means "ignore both caches"
+// (specs/deferred-cache-features.md §1), so a user debugging a bad row must not
+// have to find and edit the config file to stop the sheet being trusted.
+func TestSheetCacheFlagPrecedence(t *testing.T) {
+	enabledFile := writeConfigFile(t, `{"sheet_cache": true}`)
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{
+			name: "config file enables it",
+			args: []string{"--config", enabledFile},
+			want: true,
+		},
+		{
+			name: "--no-cache forces it off despite the config file",
+			args: []string{"--config", enabledFile, "--no-cache"},
+			want: false,
+		},
+		{
+			name: "flag enables it with no config file",
+			args: []string{"--sheet-cache"},
+			want: true,
+		},
+		{
+			name: "off when nothing asks for it",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseArgs(t, tt.args...).resolveConfig()
+			if err != nil {
+				t.Fatalf("resolveConfig() error = %v", err)
+			}
+
+			if got := cfg.SheetCacheEnabled(); got != tt.want {
+				t.Errorf("SheetCacheEnabled() = %v, want %v (args %v)", got, tt.want, tt.args)
+			}
+		})
+	}
+}
+
+// The flag has to exist under exactly this name for the documented CI
+// invocation to work, and a rename would otherwise only surface as a parse
+// error in someone's pipeline.
+func TestSheetCacheFlagIsRegistered(t *testing.T) {
+	flags := parseArgs(t)
+
+	f := flags.fs.Lookup("sheet-cache")
+	if f == nil {
+		t.Fatal("--sheet-cache is not registered")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("--sheet-cache default = %q, want false — it is opt-in", f.DefValue)
+	}
+}
+
 // TestResolveConfigUnreadableFileFails makes an explicitly-passed --config
 // that cannot be read a hard failure rather than a warning: the flag only
 // exists because the user asked for that specific file, so falling back to

@@ -125,6 +125,21 @@ type Config struct {
 	NoCache     bool      `json:"no_cache"`
 	RateLimit   RateLimit `json:"rate_limit"`
 
+	// SheetCache opts into treating the Google Sheets *output* range as a
+	// second cache alongside the local file: a row already marked Success is
+	// not re-resolved. It exists for ephemeral environments — a CI job has no
+	// ~/.isbn-resolver/cache.json between runs, but the sheet it writes to
+	// persists (specs/deferred-cache-features.md §1).
+	//
+	// Off by default because it is not free and not universally safe: it costs
+	// an extra read call per run, and it assumes the output range carries the
+	// column layout sheets.WriteResults writes. A range a user has since
+	// reshaped by hand would be read as if it still had that shape.
+	//
+	// It is additive to the local cache rather than a replacement — see
+	// SheetCacheEnabled for how --no-cache disables both.
+	SheetCache bool `json:"sheet_cache"`
+
 	// GoogleBooksAPIKey, when set, is sent as the `key` query parameter on
 	// every Google Books request, moving the run off Google's shared
 	// anonymous per-IP quota and onto a registered project's much higher one.
@@ -222,6 +237,22 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// SheetCacheEnabled reports whether the run should consult the Sheets output
+// range as a cache.
+//
+// It exists so the "--no-cache means ignore *both* caches"
+// (specs/deferred-cache-features.md §1) rule lives next to the two fields it
+// relates, rather than being re-derived at each place the sheet cache is
+// consulted — the local cache's equivalent rule is already collapsed into a
+// single cache.Mode for exactly that reason.
+//
+// --resolve-all and --retry-failed deliberately do not appear here: they change
+// *how* a cached entry is reused, not whether the cache is read at all, and they
+// apply to the sheet cache through the same cache.Mode the local cache uses.
+func (c *Config) SheetCacheEnabled() bool {
+	return c.SheetCache && !c.NoCache
 }
 
 // LoadFromEnv loads configuration from environment variables

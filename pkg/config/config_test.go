@@ -180,6 +180,83 @@ func TestLoadFromFileCacheControlFlags(t *testing.T) {
 	}
 }
 
+// The sheet cache is opt-in: it costs an extra read call per run and assumes
+// the output range still has the column layout the writer produced, so a user
+// who never asked for it must never pay for it.
+func TestDefaultConfigSheetCacheIsOff(t *testing.T) {
+	if cfg := DefaultConfig(); cfg.SheetCache {
+		t.Error("SheetCache = true by default, want false — it is opt-in")
+	}
+}
+
+// The sheet cache is the feature CI runs turn on, and CI configures the tool
+// with a checked-in config file rather than a command line, so the config key
+// matters at least as much as the flag.
+func TestLoadFromFileSheetCache(t *testing.T) {
+	cfg, err := LoadFromFile(writeConfig(t, `{"sheet_cache": true}`))
+	if err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+
+	if !cfg.SheetCache {
+		t.Error("SheetCache = false, want true from the config file")
+	}
+}
+
+// --no-cache means "ignore both caches" (specs/deferred-cache-features.md §1).
+// The combination that matters is a config file enabling the sheet cache and a
+// command line disabling caching for one run: the run must make no cache
+// assumptions at all, so the more specific instruction has to win.
+func TestSheetCacheEnabled(t *testing.T) {
+	tests := []struct {
+		name       string
+		sheetCache bool
+		noCache    bool
+		want       bool
+	}{
+		{name: "off by default", want: false},
+		{name: "enabled on its own", sheetCache: true, want: true},
+		{name: "no-cache disables it", sheetCache: true, noCache: true, want: false},
+		{name: "no-cache alone changes nothing", noCache: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SheetCache = tt.sheetCache
+			cfg.NoCache = tt.noCache
+
+			if got := cfg.SheetCacheEnabled(); got != tt.want {
+				t.Errorf("SheetCacheEnabled() = %v, want %v (sheet_cache=%v, no_cache=%v)",
+					got, tt.want, tt.sheetCache, tt.noCache)
+			}
+		})
+	}
+}
+
+// --resolve-all and --retry-failed change how a cached entry is reused, not
+// whether the cache is consulted, so neither may switch the sheet cache off —
+// the sheet cache has to reach the policy for those modes to apply to it.
+func TestSheetCacheEnabledIgnoresReusePolicyFlags(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "resolve_all", mutate: func(c *Config) { c.ResolveAll = true }},
+		{name: "retry_failed", mutate: func(c *Config) { c.RetryFailed = true }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SheetCache = true
+			tt.mutate(cfg)
+
+			if !cfg.SheetCacheEnabled() {
+				t.Errorf("SheetCacheEnabled() = false with %s set, want true", tt.name)
+			}
+		})
+	}
+}
+
 // Validate is the only thing standing between a hand-edited config file and a
 // run that quietly does nothing, so every rejected value needs a case here —
 // including the boundary values that must stay legal (concurrency 1, zero

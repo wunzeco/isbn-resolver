@@ -232,6 +232,8 @@ func registerFlags(fs *flag.FlagSet) *cliFlags {
 	fs.BoolVar(&cfg.ResolveAll, "resolve-all", cfg.ResolveAll, "Ignore cached entries and re-resolve every ISBN")
 	fs.BoolVar(&cfg.RetryFailed, "retry-failed", cfg.RetryFailed, "Reuse cached successes but re-attempt cached failures")
 	fs.BoolVar(&cfg.NoCache, "no-cache", cfg.NoCache, "Bypass the cache entirely for this run")
+	fs.BoolVar(&cfg.SheetCache, "sheet-cache", cfg.SheetCache,
+		"Treat Success rows already in the Sheets output range as cache hits (implies --sheets-output-range's column layout; disabled by --no-cache)")
 
 	// Optional Google Books credential. The flag is the least private of the
 	// three sources — it lands in shell history and in `ps` output — so its
@@ -260,6 +262,7 @@ func registerFlags(fs *flag.FlagSet) *cliFlags {
 		"resolve-all":       func(dst *config.Config) { dst.ResolveAll = cfg.ResolveAll },
 		"retry-failed":      func(dst *config.Config) { dst.RetryFailed = cfg.RetryFailed },
 		"no-cache":          func(dst *config.Config) { dst.NoCache = cfg.NoCache },
+		"sheet-cache":       func(dst *config.Config) { dst.SheetCache = cfg.SheetCache },
 		"google-books-api-key": func(dst *config.Config) {
 			dst.GoogleBooksAPIKey = cfg.GoogleBooksAPIKey
 		},
