@@ -20,6 +20,17 @@ const (
 	DefaultMaxRetries = 3
 	// DefaultBaseBackoff seeds the exponential backoff between retries.
 	DefaultBaseBackoff = 500 * time.Millisecond
+	// DefaultRequestsPerSecond paces every outbound request across the whole
+	// run. Both upstreams are free public APIs with undocumented per-IP
+	// limits, and a 489-ISBN sample exhausted Google Books' anonymous quota
+	// with no pacing at all (specs/third-fallback-api.md §0), so the default
+	// is deliberately conservative: with the default pool of 5 workers this
+	// is roughly one request per worker per second.
+	DefaultRequestsPerSecond = 5.0
+	// DefaultBurst is the token bucket's capacity. It matches
+	// DefaultConcurrency so a full pool can start its first request without
+	// waiting, while steady state is still governed by the rate above.
+	DefaultBurst = DefaultConcurrency
 )
 
 // Duration is a custom type that handles JSON unmarshaling of duration strings
@@ -65,6 +76,19 @@ type RateLimit struct {
 	// BaseBackoff is the first backoff interval; subsequent attempts grow
 	// exponentially from it (a Retry-After header, when present, wins).
 	BaseBackoff Duration `json:"base_backoff"`
+	// RequestsPerSecond paces requests proactively, across all workers, so
+	// the run avoids provoking a 429 rather than only reacting to one. It is
+	// the rate half of the shared token bucket in pkg/resolver.
+	//
+	// Zero is a legal, reachable setting meaning "unlimited" — it is how a
+	// user opts out of pacing entirely (e.g. when pointing the tool at a
+	// local fixture server), and matches resolver.NewRateLimiter's own
+	// treatment of a non-positive rate. Negative values are rejected by
+	// Validate rather than silently folded into that meaning.
+	RequestsPerSecond float64 `json:"requests_per_second"`
+	// Burst is the token bucket's capacity: how many requests may be issued
+	// back-to-back before RequestsPerSecond starts to bite.
+	Burst int `json:"burst"`
 }
 
 // Config holds the application configuration
@@ -111,8 +135,10 @@ func DefaultConfig() *Config {
 		CacheFile:   cache.DefaultFile,
 		Concurrency: DefaultConcurrency,
 		RateLimit: RateLimit{
-			MaxRetries:  DefaultMaxRetries,
-			BaseBackoff: Duration(DefaultBaseBackoff),
+			MaxRetries:        DefaultMaxRetries,
+			BaseBackoff:       Duration(DefaultBaseBackoff),
+			RequestsPerSecond: DefaultRequestsPerSecond,
+			Burst:             DefaultBurst,
 		},
 	}
 }
@@ -157,6 +183,24 @@ func (c *Config) Validate() error {
 	if c.RateLimit.BaseBackoff < 0 {
 		return fmt.Errorf("invalid rate_limit.base_backoff %s: must not be negative",
 			time.Duration(c.RateLimit.BaseBackoff))
+	}
+
+	// Zero deliberately stays legal here: resolver.NewRateLimiter reads a
+	// non-positive rate as "unlimited", so a config file saying 0 is an
+	// explicit opt-out of pacing. A negative rate has no such meaning — the
+	// limiter's wait computation divides by the rate, so it would produce a
+	// negative wait and pace nothing while looking like it configured
+	// something.
+	if c.RateLimit.RequestsPerSecond < 0 {
+		return fmt.Errorf("invalid rate_limit.requests_per_second %g: must not be negative",
+			c.RateLimit.RequestsPerSecond)
+	}
+
+	// NewRateLimiter silently coerces a burst below 1 up to 1, which would
+	// make a config file's "burst": 0 look honoured when it was not. Reject
+	// it here so the value the user wrote is the value the run uses.
+	if c.RateLimit.Burst < 1 {
+		return fmt.Errorf("invalid rate_limit.burst %d: must be at least 1", c.RateLimit.Burst)
 	}
 
 	// A negative timeout expires before the request is even sent, and zero

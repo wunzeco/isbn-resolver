@@ -46,6 +46,17 @@ func TestDefaultConfigCachingAndConcurrency(t *testing.T) {
 	if time.Duration(cfg.RateLimit.BaseBackoff) != 500*time.Millisecond {
 		t.Errorf("RateLimit.BaseBackoff = %v, want 500ms", time.Duration(cfg.RateLimit.BaseBackoff))
 	}
+	// Pacing must be on by default: the whole point of the token bucket is to
+	// avoid provoking a 429, which it cannot do if the shipped default is 0
+	// ("unlimited").
+	if cfg.RateLimit.RequestsPerSecond != 5 {
+		t.Errorf("RateLimit.RequestsPerSecond = %g, want 5", cfg.RateLimit.RequestsPerSecond)
+	}
+	// Burst tracks the pool size so a full pool starts without waiting.
+	if cfg.RateLimit.Burst != cfg.Concurrency {
+		t.Errorf("RateLimit.Burst = %d, want it to match Concurrency %d",
+			cfg.RateLimit.Burst, cfg.Concurrency)
+	}
 }
 
 // The caching spec publishes a config example; users will copy it verbatim, so
@@ -219,6 +230,34 @@ func TestValidate(t *testing.T) {
 			wantError: "invalid rate_limit.base_backoff -1s: must not be negative",
 		},
 		{
+			// 0 is the documented opt-out: resolver.NewRateLimiter reads a
+			// non-positive rate as "unlimited", so a config file must be able
+			// to reach that state deliberately.
+			name:   "zero requests_per_second means unlimited and is valid",
+			mutate: func(c *Config) { c.RateLimit.RequestsPerSecond = 0 },
+		},
+		{
+			name:   "burst of one is valid",
+			mutate: func(c *Config) { c.RateLimit.Burst = 1 },
+		},
+		{
+			name:      "negative requests_per_second",
+			mutate:    func(c *Config) { c.RateLimit.RequestsPerSecond = -2.5 },
+			wantError: "invalid rate_limit.requests_per_second -2.5: must not be negative",
+		},
+		{
+			// NewRateLimiter would coerce this to 1, making the config file
+			// look honoured when it was not.
+			name:      "zero burst",
+			mutate:    func(c *Config) { c.RateLimit.Burst = 0 },
+			wantError: "invalid rate_limit.burst 0: must be at least 1",
+		},
+		{
+			name:      "negative burst",
+			mutate:    func(c *Config) { c.RateLimit.Burst = -4 },
+			wantError: "invalid rate_limit.burst -4: must be at least 1",
+		},
+		{
 			name:      "negative timeout",
 			mutate:    func(c *Config) { c.Timeout = Duration(-time.Second) },
 			wantError: "invalid timeout -1s: must be positive",
@@ -287,6 +326,121 @@ func TestRateLimitMarshalRoundTrip(t *testing.T) {
 	}
 	if raw.RateLimit.BaseBackoff != "500ms" {
 		t.Errorf("base_backoff marshalled as %q, want \"500ms\"", raw.RateLimit.BaseBackoff)
+	}
+}
+
+// The pacing knobs are what stand between a 489-ISBN run and an exhausted
+// upstream quota, so a config file has to be able to set them — and setting one
+// must not reset the other rate-limit fields, since the nested struct is
+// unmarshalled over DefaultConfig field by field.
+func TestLoadFromFileRateLimitRateAndBurst(t *testing.T) {
+	tests := []struct {
+		name           string
+		contents       string
+		wantRate       float64
+		wantBurst      int
+		wantMaxRetries int
+	}{
+		{
+			name:           "both keys set",
+			contents:       `{"rate_limit": {"requests_per_second": 2.5, "burst": 3}}`,
+			wantRate:       2.5,
+			wantBurst:      3,
+			wantMaxRetries: DefaultMaxRetries,
+		},
+		{
+			name:           "only requests_per_second set",
+			contents:       `{"rate_limit": {"requests_per_second": 1}}`,
+			wantRate:       1,
+			wantBurst:      DefaultBurst,
+			wantMaxRetries: DefaultMaxRetries,
+		},
+		{
+			// Explicit opt-out of pacing; must survive the load as 0 rather
+			// than being backfilled with the default.
+			name:           "requests_per_second zero survives as unlimited",
+			contents:       `{"rate_limit": {"requests_per_second": 0}}`,
+			wantRate:       0,
+			wantBurst:      DefaultBurst,
+			wantMaxRetries: DefaultMaxRetries,
+		},
+		{
+			name:           "keys omitted keep their defaults",
+			contents:       `{"rate_limit": {"max_retries": 1}}`,
+			wantRate:       DefaultRequestsPerSecond,
+			wantBurst:      DefaultBurst,
+			wantMaxRetries: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadFromFile(writeConfig(t, tt.contents))
+			if err != nil {
+				t.Fatalf("LoadFromFile failed: %v", err)
+			}
+
+			if cfg.RateLimit.RequestsPerSecond != tt.wantRate {
+				t.Errorf("RateLimit.RequestsPerSecond = %g, want %g",
+					cfg.RateLimit.RequestsPerSecond, tt.wantRate)
+			}
+			if cfg.RateLimit.Burst != tt.wantBurst {
+				t.Errorf("RateLimit.Burst = %d, want %d", cfg.RateLimit.Burst, tt.wantBurst)
+			}
+			if cfg.RateLimit.MaxRetries != tt.wantMaxRetries {
+				t.Errorf("RateLimit.MaxRetries = %d, want %d",
+					cfg.RateLimit.MaxRetries, tt.wantMaxRetries)
+			}
+		})
+	}
+}
+
+// A config the tool marshals must be one it can load back with the same pacing,
+// so the two new keys have to survive the round trip under their documented
+// names.
+func TestRateLimitRateAndBurstMarshalRoundTrip(t *testing.T) {
+	data, err := json.Marshal(DefaultConfig())
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var raw struct {
+		RateLimit struct {
+			RequestsPerSecond float64 `json:"requests_per_second"`
+			Burst             int     `json:"burst"`
+		} `json:"rate_limit"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if raw.RateLimit.RequestsPerSecond != DefaultRequestsPerSecond {
+		t.Errorf("requests_per_second marshalled as %g, want %g",
+			raw.RateLimit.RequestsPerSecond, DefaultRequestsPerSecond)
+	}
+	if raw.RateLimit.Burst != DefaultBurst {
+		t.Errorf("burst marshalled as %d, want %d", raw.RateLimit.Burst, DefaultBurst)
+	}
+
+	reloaded, err := LoadFromFile(writeConfig(t, string(data)))
+	if err != nil {
+		t.Fatalf("LoadFromFile of a marshalled config failed: %v", err)
+	}
+	if reloaded.RateLimit != DefaultConfig().RateLimit {
+		t.Errorf("RateLimit round trip = %+v, want %+v",
+			reloaded.RateLimit, DefaultConfig().RateLimit)
+	}
+}
+
+// Validate runs after the precedence merge, so a hand-edited config file is the
+// path that can actually deliver a burst of 0 to the limiter.
+func TestValidateRejectsConfigFileBurst(t *testing.T) {
+	cfg, err := LoadFromFile(writeConfig(t, `{"rate_limit": {"burst": 0}}`))
+	if err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() accepted a config file with rate_limit.burst 0, want an error")
 	}
 }
 
