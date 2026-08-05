@@ -227,12 +227,26 @@ fixing §0.** What's known so far from the `examples/ISBNs.csv` run:
 
 ### 4. Verbose Output
 
-- The existing `Resolve` doesn't currently report which tier succeeded.
-  Consider whether to add that now (useful for validating the fix, and
-  cheap alongside this change) — e.g. extending the verbose
-  `✓ Resolved ISBN <isbn>: <title>` line to name the source API, or leave
-  it as a candidate follow-up if it's out of scope for this item. Decide
-  during implementation; not a hard requirement of this spec.
+- **Decided (2026-08-05): implemented, ahead of the third tier.** `Resolve`
+  now returns the answering tier's name alongside the metadata, and the
+  verbose line reads
+  `✓ Resolved ISBN 9780134190440: The Go Programming Language (via Open Library)`.
+
+  It was brought forward rather than shipped with the third tier because
+  §1's re-measurement is what the remaining items are blocked on, and that
+  measurement is far more useful when it can say *which* tier carried each
+  success — "how much is the fallback actually doing?" is otherwise
+  unanswerable from a run's output. The suffix is appended, so the line's
+  existing prefix is unchanged.
+
+  The tier name describes one resolution, not the book, so it rides on
+  `resolver.Result` rather than on `BookMetadata` — this deliberately keeps
+  it out of the JSON/CSV output schema and out of the cache file. A
+  consequence worth knowing: a cache hit prints no resolved line at all, so
+  the source is only ever reported for a fresh resolution.
+
+  `specs/performance-caching.md` §"Expected Output (Verbose Mode)" has been
+  updated to the same line shape, so the two specs do not disagree.
 
 ## Non-Goals
 
