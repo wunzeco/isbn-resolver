@@ -115,7 +115,9 @@ func main() {
 	client := newAPIClient(cfg)
 	client.OnRetry = retryWarner(progress)
 
-	policy := cache.NewPolicy(bookCache, cacheMode)
+	// The policy reads from a view that may include the sheet cache; the run
+	// still *writes* only to bookCache. See sheetCacheLookup.
+	policy := cache.NewPolicy(sheetCacheLookup(cfg, bookCache, os.Stderr), cacheMode)
 	results, errors := resolveISBNs(cfg.Concurrency, validISBNs, client, bookCache, policy, progress)
 
 	if cfg.Verbose {
@@ -351,6 +353,126 @@ func resolveCacheMode(cfg *config.Config) (cache.Mode, error) {
 	default:
 		return cache.ModeNormal, nil
 	}
+}
+
+// sheetCacheLookup returns the cache the resolve policy should read from: the
+// local cache on its own, or a merged view of it and the Google Sheets output
+// range when --sheet-cache is on (specs/deferred-cache-features.md §1).
+//
+// Merging into a view consulted by the existing cache.Policy — rather than
+// running a second policy pass over the sheet rows — is what makes
+// --resolve-all and --retry-failed apply to both caches without being spelled
+// out twice, and keeps the "Cache: H hit, M miss, R retried" counters honest:
+// Policy.Lookup counts every call, so each ISBN must be looked up exactly once.
+//
+// Every failure here is a warning rather than a fatal error. The sheet cache
+// only ever saves work; a run that cannot read it is still a correct run that
+// merely costs more API calls, and dying at this point would make an
+// unreachable sheet break runs that used to succeed.
+func sheetCacheLookup(cfg *config.Config, local *cache.Cache, warn io.Writer) *cache.Cache {
+	if !cfg.SheetCacheEnabled() {
+		return local
+	}
+
+	if cfg.SheetsURL == "" && cfg.SheetsID == "" {
+		// A flag that silently does nothing is worse than a noisy one: the
+		// sheet cache reads the *output* range, which only exists when the run
+		// is writing to a sheet at all.
+		fmt.Fprintln(warn, "Warning: --sheet-cache has no effect without --sheets-url or --sheets-id")
+		return local
+	}
+
+	rows, err := readSheetCache(cfg)
+	if err != nil {
+		fmt.Fprintf(warn, "Warning: failed to read the sheet cache: %v\n", err)
+		return local
+	}
+
+	if cfg.Verbose {
+		fmt.Fprintf(warn, "Sheet cache: %d usable row(s) in the output range\n", len(rows))
+	}
+
+	return mergeSheetCache(local, rows)
+}
+
+// readSheetCache authenticates and reads the rows already present in the output
+// range this run would write to.
+func readSheetCache(cfg *config.Config) (map[string]sheets.ExistingRow, error) {
+	ctx := context.Background()
+
+	id := spreadsheetID(cfg)
+	if id == "" {
+		return nil, fmt.Errorf("no Google Sheets ID or URL provided")
+	}
+
+	service, err := sheets.Authenticate(ctx, sheets.AuthConfig{CredentialsPath: cfg.SheetsCredentials})
+	if err != nil {
+		return nil, fmt.Errorf("authentication failed: %w", err)
+	}
+
+	// The same WriteConfig writeToSheets will use, so the cache is read from
+	// exactly the range the results land in — including under --create-new-tab,
+	// which moves that range.
+	return sheets.NewClient(ctx, service).ReadExistingStatus(sheets.WriteConfig{
+		SpreadsheetID: id,
+		OutputRange:   cfg.SheetsOutputRange,
+		CreateNewTab:  cfg.SheetsCreateTab,
+	})
+}
+
+// mergeSheetCache builds the read-only view the policy consults: the sheet's
+// rows, overlaid with the local cache's entries.
+//
+// The result is deliberately *not* the cache that gets saved. A sheet row is a
+// lossy reconstruction — nine columns, no ISBN-10, no attempt timestamp — so
+// folding those rows into the cache file would leave a later run serving
+// degraded entries as if they had been freshly resolved. The file therefore
+// keeps recording only what this machine actually resolved, and the sheet stays
+// the record for the rest.
+func mergeSheetCache(local *cache.Cache, rows map[string]sheets.ExistingRow) *cache.Cache {
+	merged := cache.New()
+
+	for key, row := range rows {
+		merged.Set(key, cache.Entry{Status: row.Status, Metadata: row.Metadata, Error: row.Error})
+	}
+
+	if local == nil {
+		return merged
+	}
+
+	for key, entry := range local.Entries {
+		// The local entry normally wins: it carries the full metadata the
+		// resolver returned rather than the nine columns the sheet keeps.
+		//
+		// The exception is a local failure over a sheet success. Both caches
+		// are consulted and a hit in either is enough, so an ISBN that failed
+		// here but was resolved into the sheet by some other run must not be
+		// re-attempted — that is precisely the CI-vs-workstation case the sheet
+		// cache exists for.
+		if entry.Status == cache.StatusError {
+			if row, ok := merged.Get(key); ok && row.Status == cache.StatusSuccess {
+				continue
+			}
+		}
+
+		merged.Set(key, entry)
+	}
+
+	return merged
+}
+
+// spreadsheetID resolves the sheet the run operates on from whichever of
+// --sheets-id / --sheets-url was given. Empty means no sheet is configured.
+func spreadsheetID(cfg *config.Config) string {
+	if cfg.SheetsID != "" {
+		return cfg.SheetsID
+	}
+
+	if cfg.SheetsURL != "" {
+		return sheets.ExtractSheetID(cfg.SheetsURL)
+	}
+
+	return ""
 }
 
 // bookResolver is the slice of resolver.APIClient the resolve loop needs. It
@@ -678,13 +800,8 @@ func getISBNsFromSheets(cfg *config.Config) ([]string, error) {
 		fmt.Fprintln(os.Stderr, "Authenticating with Google Sheets...")
 	}
 
-	// Determine spreadsheet ID
-	spreadsheetID := cfg.SheetsID
-	if spreadsheetID == "" && cfg.SheetsURL != "" {
-		spreadsheetID = sheets.ExtractSheetID(cfg.SheetsURL)
-	}
-
-	if spreadsheetID == "" {
+	id := spreadsheetID(cfg)
+	if id == "" {
 		return nil, fmt.Errorf("no Google Sheets ID or URL provided")
 	}
 
@@ -710,12 +827,12 @@ func getISBNsFromSheets(cfg *config.Config) ([]string, error) {
 	client := sheets.NewClient(ctx, service)
 
 	sheetConfig := sheets.SheetConfig{
-		SpreadsheetID: spreadsheetID,
+		SpreadsheetID: id,
 		Range:         cfg.SheetsRange,
 	}
 
 	if cfg.Verbose {
-		info, _ := client.GetSpreadsheetInfo(spreadsheetID)
+		info, _ := client.GetSpreadsheetInfo(id)
 		sheetName := "Unknown"
 		if info != nil && len(info.Sheets) > 0 {
 			sheetName = info.Properties.Title
@@ -743,12 +860,6 @@ func writeToSheets(cfg *config.Config, results []resolver.BookMetadata, errors m
 		fmt.Fprintln(os.Stderr, "Writing results to Google Sheets...")
 	}
 
-	// Determine spreadsheet ID
-	spreadsheetID := cfg.SheetsID
-	if spreadsheetID == "" && cfg.SheetsURL != "" {
-		spreadsheetID = sheets.ExtractSheetID(cfg.SheetsURL)
-	}
-
 	// Authenticate
 	authConfig := sheets.AuthConfig{
 		CredentialsPath: cfg.SheetsCredentials,
@@ -763,7 +874,7 @@ func writeToSheets(cfg *config.Config, results []resolver.BookMetadata, errors m
 	client := sheets.NewClient(ctx, service)
 
 	writeConfig := sheets.WriteConfig{
-		SpreadsheetID: spreadsheetID,
+		SpreadsheetID: spreadsheetID(cfg),
 		OutputRange:   cfg.SheetsOutputRange,
 		CreateNewTab:  cfg.SheetsCreateTab,
 		DryRun:        cfg.SheetsDryRun,

@@ -18,6 +18,7 @@ import (
 	"github.com/wunzeco/isbn-resolver/pkg/config"
 	"github.com/wunzeco/isbn-resolver/pkg/output"
 	"github.com/wunzeco/isbn-resolver/pkg/resolver"
+	"github.com/wunzeco/isbn-resolver/pkg/sheets"
 )
 
 // parseArgs runs the real flag registration against a throwaway FlagSet so the
@@ -1046,5 +1047,311 @@ func TestGetISBNsOnTheMeasurementSample(t *testing.T) {
 		if looksLikeHeader(got) {
 			t.Fatalf("header %q survived into the ISBN list", got)
 		}
+	}
+}
+
+// sheetSuccess builds a Success row shaped the way ReadExistingStatus returns
+// one: full metadata, since a skipped ISBN is re-written to the sheet from it.
+func sheetSuccess(isbnStr, title string) sheets.ExistingRow {
+	return sheets.ExistingRow{
+		Status: cache.StatusSuccess,
+		Metadata: &resolver.BookMetadata{
+			ISBN13:  isbnStr,
+			Title:   title,
+			Authors: []string{"An Author"},
+		},
+	}
+}
+
+// sheetError builds an Error row. Error rows carry no metadata — there is
+// nothing worth reusing, and the policy needs none to re-attempt them.
+func sheetError(message string) sheets.ExistingRow {
+	return sheets.ExistingRow{Status: cache.StatusError, Error: message}
+}
+
+// runWithSheetCache mimics one invocation with --sheet-cache on: the policy
+// reads the merged view, while the run still writes only to the local cache.
+// Returning the local cache is what lets a test assert on that split.
+func runWithSheetCache(t *testing.T, mode cache.Mode, client bookResolver, isbns []string, local *cache.Cache, rows map[string]sheets.ExistingRow) ([]resolver.BookMetadata, map[string]error, cache.Counters) {
+	t.Helper()
+
+	policy := cache.NewPolicy(mergeSheetCache(local, rows), mode)
+	results, failures := resolveISBNs(4, isbns, client, local, policy, io.Discard)
+
+	return results, failures, policy.Counters()
+}
+
+// TestSheetCacheSkipsRowsAlreadyResolved is the point of the feature
+// (specs/deferred-cache-features.md §1): a CI job with no local cache file
+// still doesn't re-resolve what the sheet already holds.
+func TestSheetCacheSkipsRowsAlreadyResolved(t *testing.T) {
+	const isbnStr = "9780134190440"
+
+	client := &countingResolver{}
+	local := cache.New()
+	rows := map[string]sheets.ExistingRow{
+		cache.Key(isbnStr): sheetSuccess(isbnStr, "From the sheet"),
+	}
+
+	results, failures, counters := runWithSheetCache(t, cache.ModeNormal, client, []string{isbnStr}, local, rows)
+
+	if len(client.calls) != 0 {
+		t.Errorf("calls = %v, want 0 (the sheet already has this ISBN)", client.calls)
+	}
+	if counters.Hits != 1 {
+		t.Errorf("counters = %+v, want 1 hit", counters)
+	}
+	if len(failures) != 0 {
+		t.Errorf("failures = %v, want none", failures)
+	}
+
+	// The existing row's metadata is reused rather than blanked, so writing the
+	// results back to the sheet leaves the skipped row unchanged.
+	if got, want := results[0].Title, "From the sheet"; got != want {
+		t.Errorf("title = %q, want %q", got, want)
+	}
+	if got, want := results[0].ISBN, isbnStr; got != want {
+		t.Errorf("ISBN = %q, want the spelling this run supplied (%q)", got, want)
+	}
+
+	// A sheet row is a nine-column reconstruction, so it must not be written
+	// into the local cache file, where a later run would serve it as if it had
+	// been resolved in full.
+	if local.Len() != 0 {
+		t.Errorf("local cache gained %d entry/entries from the sheet: %#v", local.Len(), local.Entries)
+	}
+}
+
+// TestSheetCacheHonoursTheCacheMode pins the requirement that --resolve-all and
+// --retry-failed mean the same thing for the sheet cache as for the local one.
+// They apply by construction — both caches go through one cache.Policy — and
+// this is the assertion that catches a wiring that broke that.
+func TestSheetCacheHonoursTheCacheMode(t *testing.T) {
+	const (
+		resolved = "9780134190440"
+		failed   = "9780132350884"
+	)
+
+	isbns := []string{resolved, failed}
+	rows := map[string]sheets.ExistingRow{
+		cache.Key(resolved): sheetSuccess(resolved, "From the sheet"),
+		cache.Key(failed):   sheetError("upstream said no"),
+	}
+
+	tests := []struct {
+		name      string
+		mode      cache.Mode
+		wantCalls []string
+	}{
+		{
+			name:      "normal reuses sheet successes and sheet errors",
+			mode:      cache.ModeNormal,
+			wantCalls: nil,
+		},
+		{
+			name:      "retry-failed re-attempts only the sheet's Error row",
+			mode:      cache.ModeRetryFailed,
+			wantCalls: []string{failed},
+		},
+		{
+			name:      "resolve-all ignores the sheet entirely",
+			mode:      cache.ModeResolveAll,
+			wantCalls: isbns,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &countingResolver{}
+
+			runWithSheetCache(t, tt.mode, client, isbns, cache.New(), rows)
+
+			if !reflect.DeepEqual(client.calls, tt.wantCalls) {
+				t.Errorf("calls = %v, want %v", client.calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+// TestSheetCacheAndLocalCacheAreBothConsulted covers the spec's "additive, not a
+// replacement": a hit in either cache is enough, and an ISBN in neither is still
+// resolved.
+func TestSheetCacheAndLocalCacheAreBothConsulted(t *testing.T) {
+	const (
+		inTheSheet = "9780134190440"
+		inTheFile  = "9780132350884"
+		inNeither  = "9780596520687"
+	)
+
+	local := cache.New()
+	local.Set(cache.Key(inTheFile), cache.Entry{
+		Status:   cache.StatusSuccess,
+		Metadata: &resolver.BookMetadata{Title: "From the file"},
+	})
+
+	rows := map[string]sheets.ExistingRow{
+		cache.Key(inTheSheet): sheetSuccess(inTheSheet, "From the sheet"),
+	}
+
+	client := &countingResolver{}
+	results, _, counters := runWithSheetCache(t, cache.ModeNormal, client, []string{inTheSheet, inTheFile, inNeither}, local, rows)
+
+	if !reflect.DeepEqual(client.calls, []string{inNeither}) {
+		t.Errorf("calls = %v, want only %s (the ISBN neither cache holds)", client.calls, inNeither)
+	}
+	if counters.Hits != 2 || counters.Misses != 1 {
+		t.Errorf("counters = %+v, want 2 hits and 1 miss", counters)
+	}
+	if got, want := results[0].Title, "From the sheet"; got != want {
+		t.Errorf("sheet-cached title = %q, want %q", got, want)
+	}
+	if got, want := results[1].Title, "From the file"; got != want {
+		t.Errorf("file-cached title = %q, want %q", got, want)
+	}
+}
+
+// TestMergeSheetCachePrefersTheLocalEntry: where both caches know an ISBN, the
+// local entry is the richer one — the sheet keeps nine columns, the cache file
+// keeps everything the resolver returned.
+func TestMergeSheetCachePrefersTheLocalEntry(t *testing.T) {
+	const isbnStr = "9780134190440"
+
+	local := cache.New()
+	local.Set(cache.Key(isbnStr), cache.Entry{
+		Status:   cache.StatusSuccess,
+		Metadata: &resolver.BookMetadata{Title: "From the file", ISBN10: "0134190440"},
+	})
+
+	merged := mergeSheetCache(local, map[string]sheets.ExistingRow{
+		cache.Key(isbnStr): sheetSuccess(isbnStr, "From the sheet"),
+	})
+
+	entry, ok := merged.Get(cache.Key(isbnStr))
+	if !ok {
+		t.Fatalf("merged view lost %s", isbnStr)
+	}
+	if got, want := entry.Metadata.Title, "From the file"; got != want {
+		t.Errorf("title = %q, want %q", got, want)
+	}
+	if got, want := entry.Metadata.ISBN10, "0134190440"; got != want {
+		t.Errorf("ISBN10 = %q, want %q — the sheet has no such column to lose it to", got, want)
+	}
+}
+
+// TestMergeSheetCacheSheetSuccessOutranksALocalFailure is the one case where the
+// local entry does not win. Either cache holding a usable success is enough to
+// skip the ISBN, so a workstation that failed on an ISBN CI has since resolved
+// into the sheet must not re-attempt it.
+func TestMergeSheetCacheSheetSuccessOutranksALocalFailure(t *testing.T) {
+	const isbnStr = "9780134190440"
+
+	local := cache.New()
+	local.Set(cache.Key(isbnStr), cache.Entry{Status: cache.StatusError, Error: "upstream said no"})
+
+	client := &countingResolver{}
+	_, failures, counters := runWithSheetCache(t, cache.ModeNormal, client, []string{isbnStr}, local, map[string]sheets.ExistingRow{
+		cache.Key(isbnStr): sheetSuccess(isbnStr, "From the sheet"),
+	})
+
+	if len(client.calls) != 0 {
+		t.Errorf("calls = %v, want 0", client.calls)
+	}
+	if counters.Hits != 1 {
+		t.Errorf("counters = %+v, want 1 hit", counters)
+	}
+	if len(failures) != 0 {
+		t.Errorf("failures = %v, want none: the sheet resolved this ISBN", failures)
+	}
+}
+
+// TestMergeSheetCacheKeepsALocalSuccessOverASheetError is the mirror image: the
+// preference is for the usable entry, not for the sheet.
+func TestMergeSheetCacheKeepsALocalSuccessOverASheetError(t *testing.T) {
+	const isbnStr = "9780134190440"
+
+	local := cache.New()
+	local.Set(cache.Key(isbnStr), cache.Entry{
+		Status:   cache.StatusSuccess,
+		Metadata: &resolver.BookMetadata{Title: "From the file"},
+	})
+
+	merged := mergeSheetCache(local, map[string]sheets.ExistingRow{
+		cache.Key(isbnStr): sheetError("upstream said no"),
+	})
+
+	entry, _ := merged.Get(cache.Key(isbnStr))
+	if entry.Status != cache.StatusSuccess {
+		t.Errorf("status = %q, want %q", entry.Status, cache.StatusSuccess)
+	}
+}
+
+// TestSheetCacheLookupSkipsUnusableConfigurations covers the two ways the sheet
+// cache is asked for but cannot be used. Both return the local cache untouched
+// rather than failing the run: the sheet cache only ever saves work.
+func TestSheetCacheLookupSkipsUnusableConfigurations(t *testing.T) {
+	local := cache.New()
+	local.Set("9780134190440", cache.Entry{Status: cache.StatusError, Error: "x"})
+
+	tests := []struct {
+		name     string
+		cfg      *config.Config
+		wantWarn string
+	}{
+		{
+			name: "--no-cache disables the sheet cache too",
+			cfg:  &config.Config{SheetCache: true, NoCache: true, SheetsID: "sheet-id"},
+		},
+		{
+			name:     "--sheet-cache without a sheet",
+			cfg:      &config.Config{SheetCache: true},
+			wantWarn: "--sheet-cache has no effect",
+		},
+		{
+			name: "sheet cache off",
+			cfg:  &config.Config{SheetsID: "sheet-id"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var warn strings.Builder
+
+			// Returning the identical cache (not a merged copy) is the
+			// observable proof no Sheets call was attempted — the alternative
+			// would have required authenticating.
+			if got := sheetCacheLookup(tt.cfg, local, &warn); got != local {
+				t.Errorf("lookup cache = %#v, want the local cache unchanged", got)
+			}
+			if !strings.Contains(warn.String(), tt.wantWarn) {
+				t.Errorf("warning = %q, want it to mention %q", warn.String(), tt.wantWarn)
+			}
+			if tt.wantWarn == "" && warn.String() != "" {
+				t.Errorf("warning = %q, want none", warn.String())
+			}
+		})
+	}
+}
+
+// TestSpreadsheetIDPrefersTheExplicitID pins the precedence the three Sheets
+// call sites now share.
+func TestSpreadsheetIDPrefersTheExplicitID(t *testing.T) {
+	const url = "https://docs.google.com/spreadsheets/d/from-the-url/edit"
+
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want string
+	}{
+		{name: "ID wins", cfg: &config.Config{SheetsID: "explicit", SheetsURL: url}, want: "explicit"},
+		{name: "URL is parsed", cfg: &config.Config{SheetsURL: url}, want: "from-the-url"},
+		{name: "neither", cfg: &config.Config{}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := spreadsheetID(tt.cfg); got != tt.want {
+				t.Errorf("spreadsheetID() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
