@@ -2,16 +2,30 @@
 
 ## Feature Overview
 
-~15% of a 488-ISBN sample fails to resolve against the current two-tier
-fallback (Open Library, then Google Books). Add a third API tier to recover
-some of that failure rate, choosing the specific API based on evidence from
-the actual failing ISBNs rather than guessing.
+~~~15% of a 488-ISBN sample fails to resolve against the current two-tier
+fallback (Open Library, then Google Books).~~ **Superseded — see the
+measurement below.** Add a third API tier to recover some of that failure
+rate, choosing the specific API based on evidence from the actual failing
+ISBNs rather than guessing.
+
+**Measurement update (2026-08-05, final):** the §0 prerequisites have all
+shipped and the official in-code re-measurement has been run. The true
+dual-API-miss rate is **21/475 unique ISBNs ≈ 4.4%**, not ~15% — the
+originally-reported gap was overwhelmingly Google Books quota exhaustion, not
+missing catalog data. **§2–§4 are on hold** pending the explicit go/no-go in
+the plan's "Categorise the genuinely-unresolvable ISBNs" item; a 4.4% residual
+is a materially weaker case for taking on either candidate API's cost than the
+15.6% this spec was written against. Every count below predating
+"Re-measurement (2026-08-05, official)" in §1 is a superseded historical
+figure, retained to show how the number moved.
 
 **Investigation update (2026-08-05):** the §1 investigation has been run
-against the real sample (`examples/ISBNs.csv`, 489 ISBNs) and surfaced two
-likely bugs inflating the measured failure rate — see §0. Fix those first;
+against the real sample (`examples/ISBNs.csv`, ~~489~~ 490 ISBNs) and surfaced
+two likely bugs inflating the measured failure rate — see §0. Fix those first;
 they're lower-cost and lower-risk than building a third API, and may close
-most of the gap on their own. Re-measure before committing to §2.
+most of the gap on their own. Re-measure before committing to §2. *(Both are
+now fixed and the re-measurement is recorded in §1; this closed as predicted —
+the bugs were the bulk of the gap.)*
 
 ## Current State
 
@@ -98,11 +112,19 @@ rather than quota exhaustion — the current failing-ISBN list is contaminated
 by the bug and cannot yet be used to decide between the two candidate APIs
 in §2 with confidence.
 
+**§0 is complete (2026-08-05).** Both bugs are fixed in code (shared limiter
+wired onto the client; `--google-books-api-key` / `ISBN_GOOGLE_BOOKS_API_KEY`
+plumbed through to the request URL), and the fresh measurement this step
+gates on is recorded under "Re-measurement (2026-08-05, official)" in §1.
+§1's numbers may now be read as genuine data gaps.
+
 **Confirmed 2026-08-05, with the limiter fix live and a Google Books API key
-tested directly (out-of-band, ahead of the code implementing key support):**
+tested directly (out-of-band, ahead of the code implementing key support).
+The official in-code run has since reproduced this out-of-band probe exactly —
+same 21 residual ISBNs, same 53 recovered by Google Books:**
 
 - The limiter fix alone (shipped) did **not** change the failure set at all —
-  re-running the full 489-ISBN sample produced the identical 74 unique
+  re-running the full ~~489~~-ISBN (490) sample produced the identical 74 unique
   failures. Verbose output showed 222 "rate limited by Google Books" retry
   warnings; a direct probe confirmed Google Books was still returning 429 for
   every one of the 74. The quota exhaustion is not a short burst window that
@@ -114,7 +136,8 @@ tested directly (out-of-band, ahead of the code implementing key support):**
   resolve** and 5 confirm no data. Final tally: **53 of 74 (71.6%) actually
   have Google Books data** — the API key, not the limiter, was the fix that
   mattered. **21 of 74 (28.4%) are genuinely absent from both APIs.**
-- **True dual-API-miss rate: 21/488 ≈ 4.3%**, not the original 76/488
+- **True dual-API-miss rate: ~~21/488 ≈ 4.3%~~ → 21/475 unique ≈ 4.4%** (the
+  denominator is corrected below; the numerator held), not the original 76/488
   (15.6%). Adding the API key alone — no third API tier — recovers the large
   majority of the originally-reported gap.
 - The remaining 21 genuine misses show a rough pattern: five sequential
@@ -122,13 +145,14 @@ tested directly (out-of-band, ahead of the code implementing key support):**
   language imprint) titles, and several `978-0-241` (Penguin) / `978-0-746`
   (Usborne) ISBNs — an odd miss for major publishers, possibly audiobook-only
   editions or very recent releases not yet indexed by either catalog.
-- **Implication for §2:** with the API key implemented (still queued in
-  `IMPLEMENTATION_PLAN.md`), the LC-vs-ISBNdb decision should be re-evaluated
-  against a ~4.3% true gap, not 15.6% — a materially weaker case for taking
-  on either candidate's cost (MARC parsing for LC, or a paid subscription for
-  ISBNdb). Recommend treating §2–§4 as on hold pending an explicit decision
-  once the key is live in code and the plan's own "Re-measure the failure
-  rate" item runs its official, in-code measurement.
+- **Implication for §2:** with the API key implemented (~~still queued in
+  `IMPLEMENTATION_PLAN.md`~~ — now shipped), the LC-vs-ISBNdb decision should
+  be re-evaluated against a ~~~4.3%~~ 4.4% true gap, not 15.6% — a materially
+  weaker case for taking on either candidate's cost (MARC parsing for LC, or a
+  paid subscription for ISBNdb). Recommend treating §2–§4 as on hold pending an
+  explicit decision once the key is live in code and the plan's own
+  "Re-measure the failure rate" item runs its official, in-code measurement.
+  *(That measurement has now run — see §1. §2–§4 remain on hold.)*
 
 ### 1. Investigation (must happen before picking the third API)
 
@@ -145,8 +169,9 @@ it, so every failure count quoted in this spec has an inflated numerator *and*
 an unreliable denominator. Treat the numbers below as indicative only; the
 plan's re-measurement item supersedes them.
 
-**Status: partially run, results contaminated by §0's bugs — re-run after
-fixing §0.** What's known so far from the `examples/ISBNs.csv` run:
+**Status: historical (pre-§0-fix) run, superseded — kept below to show how
+the number moved.** What was known from the first `examples/ISBNs.csv` run,
+before the limiter/API-key bugs were fixed:
 
 - 76/488 rows failed (74 unique ISBNs; 2 duplicate rows in the source
   file), a 15.6% failure rate, matching the originally reported ~15%.
@@ -162,6 +187,24 @@ fixing §0.** What's known so far from the `examples/ISBNs.csv` run:
   backlist — these look like plausible genuine catalog gaps rather than
   quota artifacts, but can't be confirmed until Google Books is queryable
   again for this environment.
+
+**Re-measurement (2026-08-05, official).** With §0's fixes shipped
+(limiter wired, `--google-books-api-key` plumbed through) and
+`ISBN_GOOGLE_BOOKS_API_KEY` configured, the resolver was re-run against the
+corrected `examples/ISBNs.csv` sample (490 rows, 477 unique ISBNs, header
+row excluded by the `scanISBNs` fix):
+
+- **21/477 unique ISBNs genuinely unresolvable by both APIs ≈ 4.4%** — down
+  from the original 74/477 (15.5%) pre-fix figure.
+- This matches, ISBN-for-ISBN, the out-of-band probe run directly against
+  Google Books with the API key ahead of the code landing (see the
+  "Confirmed 2026-08-05" bullets above §1): same 21 residual ISBNs, same 53
+  recovered once the key unblocked Google Books.
+- The `979-8`/`978-5`/sequential-backlist prefix pattern noted above holds
+  up in the final 21 — they are genuine catalog gaps, not quota artifacts.
+- **Go/no-go for §2:** left to the plan's separate "Categorise the
+  genuinely-unresolvable ISBNs and decide LC vs ISBNdb" item — this item's
+  scope is the measurement itself, not the resulting API decision.
 
 - Run the resolver's existing `--verbose` output (or a small one-off script
   reusing `pkg/resolver`) against the full 488-ISBN sample and capture the
