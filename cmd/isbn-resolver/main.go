@@ -534,8 +534,6 @@ func cachedError(entry cache.Entry) error {
 
 // getISBNs retrieves ISBNs from command-line args, file, stdin, or Google Sheets
 func getISBNs(cfg *config.Config) ([]string, error) {
-	var isbns []string
-
 	// Check if reading from Google Sheets
 	if cfg.SheetsURL != "" || cfg.SheetsID != "" {
 		return getISBNsFromSheets(cfg)
@@ -549,15 +547,8 @@ func getISBNs(cfg *config.Config) ([]string, error) {
 		}
 		defer file.Close()
 
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" && !strings.HasPrefix(line, "#") {
-				isbns = append(isbns, line)
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
+		isbns, err := scanISBNs(file)
+		if err != nil {
 			return nil, fmt.Errorf("failed to read file: %w", err)
 		}
 
@@ -578,22 +569,88 @@ func getISBNs(cfg *config.Config) ([]string, error) {
 
 	if (stat.Mode() & os.ModeCharDevice) == 0 {
 		// Data is being piped to stdin
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" && !strings.HasPrefix(line, "#") {
-				isbns = append(isbns, line)
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
+		isbns, err := scanISBNs(os.Stdin)
+		if err != nil {
 			return nil, fmt.Errorf("failed to read stdin: %w", err)
 		}
 
 		return isbns, nil
 	}
 
+	return nil, nil
+}
+
+// scanISBNs reads one ISBN per line, ignoring blank lines and `#` comments.
+//
+// A leading column header is dropped. examples/ISBNs.csv — the sample the
+// third-fallback spec measures against — starts with a literal `ISBN` line,
+// which would otherwise be fed in as an ISBN and counted as a failure,
+// inflating the denominator of exactly the measurement that file exists for.
+// Only the first content line is ever considered for this; a header can only
+// appear there, and skipping later look-alike lines would hide real input.
+func scanISBNs(r io.Reader) ([]string, error) {
+	var isbns []string
+
+	atFirstLine := true
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if atFirstLine {
+			atFirstLine = false
+			if looksLikeHeader(line) {
+				continue
+			}
+		}
+
+		isbns = append(isbns, line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
 	return isbns, nil
+}
+
+// looksLikeHeader reports whether a line is a column label rather than an ISBN.
+//
+// The test is deliberately narrow: an ISBN is digits, optionally separated by
+// hyphens or spaces, with an optional trailing `X` check digit. A line carrying
+// any other character cannot be a mistyped ISBN, so it is a label. A line that
+// is purely numeric but the wrong length *is* a malformed ISBN and must still
+// reach validation to be reported — silently dropping it would turn a data
+// error into a missing row.
+func looksLikeHeader(line string) bool {
+	compact := strings.Map(func(r rune) rune {
+		if r == '-' || r == ' ' {
+			return -1
+		}
+
+		return r
+	}, line)
+
+	if compact == "" {
+		return false
+	}
+
+	for i, r := range compact {
+		if r >= '0' && r <= '9' {
+			continue
+		}
+
+		// The check digit of an ISBN-10 may be `X`, but only in last place.
+		if (r == 'X' || r == 'x') && i == len(compact)-1 {
+			continue
+		}
+
+		return true
+	}
+
+	return false
 }
 
 // getISBNsFromSheets retrieves ISBNs from Google Sheets

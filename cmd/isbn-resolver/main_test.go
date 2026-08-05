@@ -848,3 +848,137 @@ func TestGoogleBooksAPIKeyFlagOutranksTheEnvironment(t *testing.T) {
 		t.Errorf("GoogleBooksAPIKey = %q, want %q", cfg.GoogleBooksAPIKey, "env-key")
 	}
 }
+
+// writeInputFile writes an ISBN list into a temp dir and returns its path.
+func writeInputFile(t *testing.T, contents string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "isbns.csv")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("writing input file: %v", err)
+	}
+
+	return path
+}
+
+// A leading `ISBN` header — the first line of examples/ISBNs.csv — must not be
+// read as an ISBN. It would fail validation and inflate the failure count of
+// the very measurement runs that sample exists for.
+func TestGetISBNsSkipsAColumnHeader(t *testing.T) {
+	path := writeInputFile(t, "ISBN\n9780134190440\n9780596520687\n")
+
+	isbns, err := getISBNs(&config.Config{InputFile: path})
+	if err != nil {
+		t.Fatalf("getISBNs: %v", err)
+	}
+
+	want := []string{"9780134190440", "9780596520687"}
+	if !reflect.DeepEqual(isbns, want) {
+		t.Fatalf("got %v, want %v", isbns, want)
+	}
+}
+
+// The header check must survive blank lines and comments above it, since the
+// header is the first *content* line rather than literally the first line.
+func TestGetISBNsSkipsAHeaderBelowCommentsAndBlanks(t *testing.T) {
+	path := writeInputFile(t, "# catalogue export\n\nISBN\n9780134190440\n")
+
+	isbns, err := getISBNs(&config.Config{InputFile: path})
+	if err != nil {
+		t.Fatalf("getISBNs: %v", err)
+	}
+
+	want := []string{"9780134190440"}
+	if !reflect.DeepEqual(isbns, want) {
+		t.Fatalf("got %v, want %v", isbns, want)
+	}
+}
+
+// The counterpart guarantee: a file that starts straight in on data loses
+// nothing. Skipping unconditionally would silently drop a real ISBN.
+func TestGetISBNsKeepsAFirstLineThatIsAnISBN(t *testing.T) {
+	path := writeInputFile(t, "9780134190440\n9780596520687\n")
+
+	isbns, err := getISBNs(&config.Config{InputFile: path})
+	if err != nil {
+		t.Fatalf("getISBNs: %v", err)
+	}
+
+	want := []string{"9780134190440", "9780596520687"}
+	if !reflect.DeepEqual(isbns, want) {
+		t.Fatalf("got %v, want %v", isbns, want)
+	}
+}
+
+// A malformed ISBN is a data error the user needs told about, so it must reach
+// validation rather than being mistaken for a header and dropped.
+func TestGetISBNsKeepsAMalformedFirstLine(t *testing.T) {
+	path := writeInputFile(t, "97801341904\n9780596520687\n")
+
+	isbns, err := getISBNs(&config.Config{InputFile: path})
+	if err != nil {
+		t.Fatalf("getISBNs: %v", err)
+	}
+
+	want := []string{"97801341904", "9780596520687"}
+	if !reflect.DeepEqual(isbns, want) {
+		t.Fatalf("got %v, want %v", isbns, want)
+	}
+}
+
+func TestLooksLikeHeader(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"plain label", "ISBN", true},
+		{"label with a digit", "ISBN-13", true},
+		{"multi-column label", "ISBN,Title", true},
+		{"lowercase label", "isbn", true},
+		{"plain isbn-13", "9780134190440", false},
+		{"hyphenated isbn-13", "978-0-13-419044-0", false},
+		{"spaced isbn-13", "978 0 13 419044 0", false},
+		{"isbn-10 with an X check digit", "080442957X", false},
+		{"lowercase x check digit", "080442957x", false},
+		{"malformed, too short", "97801341904", false},
+		{"an X anywhere but last is not a check digit", "08X442957", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := looksLikeHeader(tt.line); got != tt.want {
+				t.Fatalf("looksLikeHeader(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+// The real sample is the reason this exists: it must yield exactly its ISBNs,
+// with the header excluded from the count.
+//
+// The count is 490, not the 489 quoted in specs/third-fallback-api.md. That
+// figure came from `wc -l`, which reports 490 for this file because it has
+// CRLF endings and no trailing newline — so the last ISBN is not counted.
+// 491 content lines = 1 header + 490 ISBNs (477 of them unique).
+func TestGetISBNsOnTheMeasurementSample(t *testing.T) {
+	path := filepath.Join("..", "..", "examples", "ISBNs.csv")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("measurement sample not present: %v", err)
+	}
+
+	isbns, err := getISBNs(&config.Config{InputFile: path})
+	if err != nil {
+		t.Fatalf("getISBNs: %v", err)
+	}
+
+	if len(isbns) != 490 {
+		t.Fatalf("got %d ISBNs, want 490", len(isbns))
+	}
+
+	for _, got := range isbns {
+		if looksLikeHeader(got) {
+			t.Fatalf("header %q survived into the ISBN list", got)
+		}
+	}
+}
