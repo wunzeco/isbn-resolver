@@ -177,19 +177,28 @@ Your Google Sheet should have ISBNs in a single column:
 
 ## Output Format
 
-Results are written with the following columns:
+Results are written as a header row followed by one row per ISBN, in these
+nine columns:
 
 | Column | Field | Description |
 |--------|-------|-------------|
-| B (or first output column) | Status | "Success" or "Error" |
+| B (or first output column) | ISBN-13 | The resolved ISBN-13, or the ISBN as supplied when none was resolved |
 | C | Title | Book title |
 | D | Authors | Comma-separated list of authors |
 | E | Publisher | Publisher name |
 | F | Publication Date | Date published |
-| G | Pages | Number of pages |
-| H | Language | Language code |
-| I | Categories | Comma-separated categories |
-| J | Error | Error message (if failed) |
+| G | Pages | Number of pages (blank when unknown) |
+| H | Categories | Comma-separated categories |
+| I | Status | "Success" or "Error" |
+| J | Error | Error message (Error rows only) |
+
+Column letters assume the default output anchor of `B1`, which leaves column A
+for your input ISBNs; the nine columns always start wherever
+`--sheets-output-range` points.
+
+This layout is not merely cosmetic — `--sheet-cache` reads these exact columns
+back to decide what it can skip, so a sheet whose output range holds a
+different layout will not produce cache hits.
 
 ## Troubleshooting
 
