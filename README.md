@@ -206,6 +206,31 @@ isbn-resolver 978-0134190440 --no-cache
 - `--verbose` prints a cache breakdown (`Cache: 812 hit, 40 miss, 6 retried`)
   alongside the usual per-ISBN progress output.
 
+### Google Books API key (optional)
+
+Google Books requests are anonymous by default, which draws on a shared
+per-IP quota. On large runs that quota can be exhausted mid-run, and every
+subsequent ISBN then fails with a 429 that looks indistinguishable from
+"this book isn't in the catalog" — on a 489-ISBN sample, 53 ISBNs reported
+as unresolvable turned out to be resolvable once a key was in play.
+
+Supply a key (from a Google Cloud project with the Books API enabled) to run
+against that project's much higher quota instead:
+
+```bash
+# Preferred: keeps the key out of shell history and `ps` output
+export ISBN_GOOGLE_BOOKS_API_KEY="your-key"
+isbn-resolver --file isbns.txt
+
+# One-off runs
+isbn-resolver --file isbns.txt --google-books-api-key "your-key"
+```
+
+The key is entirely optional — with none set, the tool behaves exactly as it
+always has. It is never printed: error messages that would otherwise embed
+the request URL have the key replaced with `REDACTED`, which matters because
+those messages reach stderr and are stored in the cache file.
+
 ## Configuration
 
 ### Command-Line Flags
@@ -229,6 +254,7 @@ isbn-resolver 978-0134190440 --no-cache
 | `--resolve-all` | Ignore cached entries and re-resolve every ISBN | false |
 | `--retry-failed` | Reuse cached successes but re-attempt cached failures | false |
 | `--no-cache` | Bypass the cache entirely for this run | false |
+| `--google-books-api-key` | Google Books API key (optional; see below) | - |
 
 ### Environment Variables
 
@@ -239,6 +265,7 @@ isbn-resolver 978-0134190440 --no-cache
 | `ISBN_VERBOSE` | Enable verbose mode (true/false) |
 | `ISBN_CACHE_FILE` | Resolution cache file path |
 | `ISBN_CONCURRENCY` | Number of concurrent resolution workers |
+| `ISBN_GOOGLE_BOOKS_API_KEY` | Google Books API key (optional) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON |
 | `GOOGLE_SHEETS_CREDENTIALS` | Alternative credentials path |
 
