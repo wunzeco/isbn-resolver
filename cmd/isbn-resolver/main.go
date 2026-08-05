@@ -19,6 +19,8 @@ import (
 )
 
 func main() {
+	start := time.Now()
+
 	flags := registerFlags(flag.CommandLine)
 	flag.Parse()
 	flags.harvest()
@@ -139,9 +141,7 @@ func main() {
 		}
 
 		if cfg.Verbose {
-			successful := len(validISBNs) - len(errors)
-			fmt.Fprintf(os.Stderr, "\nSummary: %d successful, %d failed out of %d total\n",
-				successful, len(errors), len(validISBNs))
+			printSummary(os.Stderr, len(validISBNs)-len(errors), len(errors), len(validISBNs), time.Since(start))
 		}
 		return
 	}
@@ -167,10 +167,17 @@ func main() {
 
 	// Print summary in verbose mode
 	if cfg.Verbose {
-		successful := len(validISBNs) - len(errors)
-		fmt.Fprintf(os.Stderr, "\nSummary: %d successful, %d failed out of %d total\n",
-			successful, len(errors), len(validISBNs))
+		printSummary(os.Stderr, len(validISBNs)-len(errors), len(errors), len(validISBNs), time.Since(start))
 	}
+}
+
+// printSummary writes the verbose-mode "Summary: ..." / "Duration: ..." block
+// (spec §"Expected Output (Verbose Mode)") to w. Both the Google Sheets output
+// path and the stdout formatting path print an identical block, so it lives
+// here once rather than twice in main.
+func printSummary(w io.Writer, successful, failed, total int, elapsed time.Duration) {
+	fmt.Fprintf(w, "\nSummary: %d successful, %d failed out of %d total\n", successful, failed, total)
+	fmt.Fprintf(w, "Duration: %s\n", elapsed)
 }
 
 // cliFlags owns the flag-bound values and knows which of them the user actually

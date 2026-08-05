@@ -620,3 +620,29 @@ func TestResolveCacheMode(t *testing.T) {
 		})
 	}
 }
+
+// TestPrintSummaryIncludesDuration asserts the verbose "Summary"/"Duration"
+// block (spec §"Expected Output (Verbose Mode)") is emitted in the right
+// shape. It checks the Duration line's format rather than an exact value,
+// since elapsed time is inherently non-deterministic.
+func TestPrintSummaryIncludesDuration(t *testing.T) {
+	var buf strings.Builder
+	printSummary(&buf, 848, 4, 852, 9200*time.Millisecond)
+
+	got := buf.String()
+
+	wantSummary := "Summary: 848 successful, 4 failed out of 852 total"
+	if !strings.Contains(got, wantSummary) {
+		t.Errorf("printSummary() output = %q, want it to contain %q", got, wantSummary)
+	}
+
+	wantDuration := "Duration: 9.2s"
+	if !strings.Contains(got, wantDuration) {
+		t.Errorf("printSummary() output = %q, want it to contain %q", got, wantDuration)
+	}
+
+	// Duration must follow Summary, matching the spec's ordering.
+	if strings.Index(got, wantSummary) > strings.Index(got, wantDuration) {
+		t.Errorf("printSummary() output = %q, want Summary before Duration", got)
+	}
+}
