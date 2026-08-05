@@ -25,6 +25,14 @@ func main() {
 
 	cfg := flags.resolveConfig()
 
+	// Reject unusable values before any work starts. A config file is free to
+	// say "concurrency": 0, and nothing downstream would complain — the run
+	// would simply resolve nothing and report every ISBN as missing.
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Resolve the cache-control settings into a single mode before doing any
 	// work, so a contradictory invocation fails immediately rather than after
 	// authenticating with Google Sheets or reading a large input file.

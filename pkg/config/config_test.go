@@ -169,6 +169,94 @@ func TestLoadFromFileCacheControlFlags(t *testing.T) {
 	}
 }
 
+// Validate is the only thing standing between a hand-edited config file and a
+// run that quietly does nothing, so every rejected value needs a case here —
+// including the boundary values that must stay legal (concurrency 1, zero
+// retries, zero backoff), which are easy to over-reject.
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name string
+		// mutate adjusts a default (therefore valid) config.
+		mutate    func(*Config)
+		wantError string
+	}{
+		{
+			name:   "defaults are valid",
+			mutate: func(*Config) {},
+		},
+		{
+			name:   "single worker is valid",
+			mutate: func(c *Config) { c.Concurrency = 1 },
+		},
+		{
+			// Fail fast on the first 429 rather than retry — a choice, not a mistake.
+			name:   "zero retries is valid",
+			mutate: func(c *Config) { c.RateLimit.MaxRetries = 0 },
+		},
+		{
+			name:   "zero backoff is valid",
+			mutate: func(c *Config) { c.RateLimit.BaseBackoff = 0 },
+		},
+		{
+			// The motivating bug: a pool of zero workers resolves nothing.
+			name:      "zero concurrency",
+			mutate:    func(c *Config) { c.Concurrency = 0 },
+			wantError: "invalid concurrency 0: must be at least 1",
+		},
+		{
+			name:      "negative concurrency",
+			mutate:    func(c *Config) { c.Concurrency = -3 },
+			wantError: "invalid concurrency -3: must be at least 1",
+		},
+		{
+			name:      "negative max_retries",
+			mutate:    func(c *Config) { c.RateLimit.MaxRetries = -1 },
+			wantError: "invalid rate_limit.max_retries -1: must not be negative",
+		},
+		{
+			name:      "negative base_backoff",
+			mutate:    func(c *Config) { c.RateLimit.BaseBackoff = Duration(-time.Second) },
+			wantError: "invalid rate_limit.base_backoff -1s: must not be negative",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() = nil, want %q", tt.wantError)
+			}
+			// The message is the only thing the user sees before exit 1, so
+			// it has to name both the setting and the offending value.
+			if err.Error() != tt.wantError {
+				t.Errorf("Validate() = %q, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+// The file path is the gap Validate closes: LoadFromEnv already drops a
+// non-positive ISBN_CONCURRENCY, but LoadFromFile takes any number that parses.
+func TestValidateRejectsConfigFileConcurrency(t *testing.T) {
+	cfg, err := LoadFromFile(writeConfig(t, `{"concurrency": 0}`))
+	if err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() accepted a config file with concurrency 0, want an error")
+	}
+}
+
 // base_backoff must survive a save/load round trip in the same string form the
 // spec documents, so a config the tool writes stays a config a human can read.
 func TestRateLimitMarshalRoundTrip(t *testing.T) {

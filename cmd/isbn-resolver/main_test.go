@@ -194,6 +194,38 @@ func TestResolveConfigUnreadableFileFallsBackToDefaults(t *testing.T) {
 	}
 }
 
+// TestResolveConfigValidation covers the seam main() relies on: Validate runs
+// on the *merged* config, so a bad value in a config file is fatal only when no
+// later layer has replaced it. Validating any single layer in isolation would
+// either miss the flag that fixes it or reject a run that is actually fine.
+func TestResolveConfigValidation(t *testing.T) {
+	badFile := writeConfigFile(t, `{"concurrency": 0}`)
+
+	t.Run("bad file value is rejected", func(t *testing.T) {
+		cfg := parseArgs(t, "--config", badFile).resolveConfig()
+
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("Validate() = nil for a config file with concurrency 0, want an error")
+		}
+	})
+
+	t.Run("flag overrides the bad file value", func(t *testing.T) {
+		cfg := parseArgs(t, "--config", badFile, "--concurrency", "4").resolveConfig()
+
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want nil once --concurrency overrides the file", err)
+		}
+	})
+
+	t.Run("bad flag value is rejected", func(t *testing.T) {
+		cfg := parseArgs(t, "--concurrency", "0").resolveConfig()
+
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("Validate() = nil for --concurrency 0, want an error")
+		}
+	})
+}
+
 // TestEveryFlagHasAnOverride is the guard that keeps the precedence fix from
 // rotting: a flag registered without a matching entry in cliFlags.apply is
 // silently ignored whenever --config is passed, which is exactly the bug this

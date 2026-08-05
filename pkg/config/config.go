@@ -133,6 +133,35 @@ func LoadFromFile(filename string) (*Config, error) {
 	return cfg, nil
 }
 
+// Validate reports the first setting that cannot produce a working run.
+//
+// It exists because LoadFromFile accepts anything that parses as JSON: a config
+// file saying "concurrency": 0 starts a worker pool with no workers, so nothing
+// is ever resolved and the run looks like an upstream outage rather than a
+// typo. LoadFromEnv already ignores non-positive values, which leaves the
+// config file and the flags as the paths that need checking.
+//
+// Call it after the precedence merge, so it judges the values the run will
+// actually use rather than those of any single layer.
+func (c *Config) Validate() error {
+	if c.Concurrency < 1 {
+		return fmt.Errorf("invalid concurrency %d: must be at least 1", c.Concurrency)
+	}
+
+	// Zero retries is a legitimate choice — fail fast on the first 429 — so
+	// only a negative count, which no backoff loop can honour, is rejected.
+	if c.RateLimit.MaxRetries < 0 {
+		return fmt.Errorf("invalid rate_limit.max_retries %d: must not be negative", c.RateLimit.MaxRetries)
+	}
+
+	if c.RateLimit.BaseBackoff < 0 {
+		return fmt.Errorf("invalid rate_limit.base_backoff %s: must not be negative",
+			time.Duration(c.RateLimit.BaseBackoff))
+	}
+
+	return nil
+}
+
 // LoadFromEnv loads configuration from environment variables
 func (c *Config) LoadFromEnv() {
 	if timeout := os.Getenv("ISBN_TIMEOUT"); timeout != "" {
