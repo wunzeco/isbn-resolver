@@ -106,9 +106,7 @@ func main() {
 	}
 
 	// Create API client
-	client := resolver.NewAPIClient(time.Duration(cfg.Timeout))
-	client.MaxRetries = cfg.RateLimit.MaxRetries
-	client.BaseBackoff = time.Duration(cfg.RateLimit.BaseBackoff)
+	client := newAPIClient(cfg)
 
 	progress := io.Discard
 	if cfg.Verbose {
@@ -346,6 +344,28 @@ func resolveCacheMode(cfg *config.Config) (cache.Mode, error) {
 // the resolver's side.
 type bookResolver interface {
 	Resolve(isbn string) (*resolver.BookMetadata, error)
+}
+
+// newAPIClient builds the single APIClient the whole run shares, including the
+// one rate limiter every pool worker paces itself against.
+//
+// The limiter is constructed here, once, and deliberately not per worker: a
+// per-worker bucket would let a pool of N workers issue N times the configured
+// rate, which is the opposite of the point. resolveISBNs hands this same
+// *APIClient to every goroutine in the pool, so a single shared *RateLimiter on
+// it governs the run as a whole (spec §4).
+//
+// Until this existed, APIClient.Limiter was declared and consumed by
+// doWithRetry but never assigned outside tests, so RateLimiter.Wait's nil
+// receiver no-op meant real runs paced nothing at all — the quota exhaustion
+// recorded in specs/third-fallback-api.md §0.
+func newAPIClient(cfg *config.Config) *resolver.APIClient {
+	client := resolver.NewAPIClient(time.Duration(cfg.Timeout))
+	client.MaxRetries = cfg.RateLimit.MaxRetries
+	client.BaseBackoff = time.Duration(cfg.RateLimit.BaseBackoff)
+	client.Limiter = resolver.NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst)
+
+	return client
 }
 
 // resolveISBNs resolves each ISBN, consulting the cache first, then resolving

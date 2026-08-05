@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -644,5 +646,98 @@ func TestPrintSummaryIncludesDuration(t *testing.T) {
 	// Duration must follow Summary, matching the spec's ordering.
 	if strings.Index(got, wantSummary) > strings.Index(got, wantDuration) {
 		t.Errorf("printSummary() output = %q, want Summary before Duration", got)
+	}
+}
+
+// TestNewAPIClientAttachesARateLimiter pins the wiring that was missing:
+// APIClient.Limiter was declared and consumed by doWithRetry, but never
+// assigned outside tests. Because RateLimiter.Wait is a documented no-op on a
+// nil receiver, that gap was silent — every real run issued unpaced traffic and
+// looked fine until Google Books' anonymous quota ran out
+// (specs/third-fallback-api.md §0).
+func TestNewAPIClientAttachesARateLimiter(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.RateLimit.MaxRetries = 7
+	cfg.RateLimit.BaseBackoff = config.Duration(250 * time.Millisecond)
+
+	client := newAPIClient(cfg)
+
+	if client.Limiter == nil {
+		t.Fatal("newAPIClient() left Limiter nil; every request would be unpaced")
+	}
+	if client.MaxRetries != 7 {
+		t.Errorf("MaxRetries = %d, want 7", client.MaxRetries)
+	}
+	if client.BaseBackoff != 250*time.Millisecond {
+		t.Errorf("BaseBackoff = %v, want 250ms", client.BaseBackoff)
+	}
+}
+
+// TestNewAPIClientLimiterPacesConcurrentResolution proves the limiter is
+// actually consulted on the path the pool takes, not merely non-nil, and that
+// one bucket governs all workers rather than one per worker.
+//
+// The assertion is a duration floor rather than an exact time: a bucket of
+// `burst` tokens refilling at `rate`/s cannot release N requests in less than
+// (N-burst)/rate seconds, no matter how fast the server answers. With a
+// per-worker limiter the same run would finish in roughly a quarter of that,
+// so the floor is what distinguishes shared pacing from per-worker pacing.
+func TestNewAPIClientLimiterPacesConcurrentResolution(t *testing.T) {
+	const (
+		requests    = 8
+		concurrency = 4
+		rate        = 40.0
+		burst       = 1
+	)
+
+	var mu sync.Mutex
+	var served int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		served++
+		mu.Unlock()
+
+		bibkey := r.URL.Query().Get("bibkeys")
+		fmt.Fprintf(w, `{%q: {"title": "Paced"}}`, bibkey)
+	}))
+	defer server.Close()
+
+	cfg := config.DefaultConfig()
+	cfg.RateLimit.RequestsPerSecond = rate
+	cfg.RateLimit.Burst = burst
+
+	client := newAPIClient(cfg)
+	client.OpenLibraryBaseURL = server.URL
+
+	isbns := make([]string, requests)
+	for i := range isbns {
+		isbns[i] = fmt.Sprintf("978013419044%d", i)
+	}
+
+	store := cache.New()
+	policy := cache.NewPolicy(store, cache.ModeNoCache)
+
+	start := time.Now()
+	results, failures := resolveISBNs(concurrency, isbns, client, store, policy, io.Discard)
+	elapsed := time.Since(start)
+
+	if len(failures) != 0 {
+		t.Fatalf("failures = %v, want none", failures)
+	}
+	for i, res := range results {
+		if res.Title != "Paced" {
+			t.Fatalf("results[%d].Title = %q, want %q", i, res.Title, "Paced")
+		}
+	}
+	if served != requests {
+		t.Fatalf("server saw %d requests, want %d", served, requests)
+	}
+
+	// Allow a small tolerance below the theoretical floor for timer coarseness;
+	// the point is that pacing happened at all, not its precise magnitude.
+	floor := time.Duration(float64(requests-burst) / rate * float64(time.Second))
+	if min := floor - floor/10; elapsed < min {
+		t.Errorf("resolving %d ISBNs at %g/s took %v, want at least %v — the shared limiter was not consulted",
+			requests, rate, elapsed, min)
 	}
 }
