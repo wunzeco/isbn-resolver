@@ -160,6 +160,27 @@ func TestRetryDelayHonoursHTTPDateRetryAfter(t *testing.T) {
 	}
 }
 
+// defaultJitter is the real jitter function wired into a fresh APIClient;
+// every other retry test stubs it out to zero for determinism, so it needs
+// its own direct coverage.
+func TestDefaultJitterWithinRange(t *testing.T) {
+	base := 100 * time.Millisecond
+	for i := 0; i < 50; i++ {
+		d := defaultJitter(base)
+		if d < 0 || d >= base {
+			t.Fatalf("defaultJitter(%v) = %v, want [0, %v)", base, d, base)
+		}
+	}
+}
+
+func TestDefaultJitterNonPositiveBaseReturnsZero(t *testing.T) {
+	for _, base := range []time.Duration{0, -time.Second} {
+		if d := defaultJitter(base); d != 0 {
+			t.Errorf("defaultJitter(%v) = %v, want 0", base, d)
+		}
+	}
+}
+
 func TestFetchFromOpenLibraryRetriesThenParses(t *testing.T) {
 	var attempts int
 	openLibrary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

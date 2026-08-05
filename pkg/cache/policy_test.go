@@ -204,6 +204,19 @@ func TestPolicyNilCache(t *testing.T) {
 	}
 }
 
+// Mode reports back the mode a Policy was constructed with, so callers (the
+// verbose cache header) don't need to thread the flag-derived mode separately.
+func TestPolicyModeReturnsConstructedMode(t *testing.T) {
+	for _, mode := range []Mode{ModeNormal, ModeResolveAll, ModeRetryFailed, ModeNoCache} {
+		t.Run(mode.String(), func(t *testing.T) {
+			p := NewPolicy(New(), mode)
+			if got := p.Mode(); got != mode {
+				t.Errorf("Mode() = %v, want %v", got, mode)
+			}
+		})
+	}
+}
+
 // Persists is what decides whether the run writes the cache file back. Only
 // --no-cache opts out: --resolve-all and --retry-failed re-resolve precisely so
 // they can refresh the entries they touched.

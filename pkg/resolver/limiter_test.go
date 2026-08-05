@@ -40,6 +40,21 @@ func TestRateLimiterEnforcesFloorDuration(t *testing.T) {
 	}
 }
 
+// NewRateLimiter coerces a non-positive burst up to 1 rather than leaving a
+// bucket with zero capacity, which would make Wait spin forever waiting for
+// a token that a zero-capacity bucket could never hold.
+func TestNewRateLimiterCoercesBurstToAtLeastOne(t *testing.T) {
+	for _, burst := range []int{0, -5} {
+		l := NewRateLimiter(10, burst)
+		if l.burst != 1 {
+			t.Errorf("NewRateLimiter(10, %d).burst = %v, want 1", burst, l.burst)
+		}
+		if l.tokens != 1 {
+			t.Errorf("NewRateLimiter(10, %d).tokens = %v, want 1 (bucket starts full)", burst, l.tokens)
+		}
+	}
+}
+
 func TestRateLimiterZeroOrNegativeRateIsUnlimited(t *testing.T) {
 	l := NewRateLimiter(0, 1)
 	start := time.Now()
