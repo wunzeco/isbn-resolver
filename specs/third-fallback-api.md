@@ -10,14 +10,19 @@ ISBNs rather than guessing.
 
 **Measurement update (2026-08-05, final):** the §0 prerequisites have all
 shipped and the official in-code re-measurement has been run. The true
-dual-API-miss rate is **21/475 unique ISBNs ≈ 4.4%**, not ~15% — the
+dual-API-miss rate is **21/477 unique ISBNs ≈ 4.4%**, not ~15% — the
 originally-reported gap was overwhelmingly Google Books quota exhaustion, not
-missing catalog data. **§2–§4 are on hold** pending the explicit go/no-go in
-the plan's "Categorise the genuinely-unresolvable ISBNs" item; a 4.4% residual
-is a materially weaker case for taking on either candidate API's cost than the
-15.6% this spec was written against. Every count below predating
-"Re-measurement (2026-08-05, official)" in §1 is a superseded historical
-figure, retained to show how the number moved.
+missing catalog data. Every count below predating "Re-measurement (2026-08-05,
+official)" in §1 is a superseded historical figure, retained to show how the
+number moved.
+
+**Decision (2026-08-05, final): no third tier.** The project owner reviewed
+the 4.4% residual and decided it does not justify either candidate's cost —
+a MARCXML parser for Library of Congress, or a paid subscription for ISBNdb.
+**§2–§4 below are kept for the record (the investigation was real and the
+API research may be useful if the gap grows) but are explicitly closed,
+not merely deferred.** No further work is planned against this spec unless
+the failure rate becomes a problem again at a materially larger scale.
 
 **Investigation update (2026-08-05):** the §1 investigation has been run
 against the real sample (`examples/ISBNs.csv`, ~~489~~ 490 ISBNs) and surfaced
@@ -225,6 +230,9 @@ row excluded by the `scanISBNs` fix):
   to build is made explicitly, not assumed.
 
 ### 2. Candidate APIs (pick one based on §1, do not build both speculatively)
+
+**Closed, no-go (2026-08-05) — kept for reference only, not actionable.**
+See the Decision note under Feature Overview.
 
 **Option A — Library of Congress SRU/MARC API**
 - Free, no API key, no rate-limit-by-subscription-tier concerns.
