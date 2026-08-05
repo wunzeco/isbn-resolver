@@ -20,9 +20,24 @@ type RateLimiter struct {
 	tokens     float64
 	lastRefill time.Time
 
+	// now and sleep are test hooks. Wait's loop makes progress only because
+	// time passes between passes, so a test that stubs both — a frozen clock
+	// plus a no-op sleep — removes the loop's only exit condition. Rather
+	// than leave that as an unwritten precondition on the hooks, Wait detects
+	// a non-advancing clock and panics (see maxNonAdvancingWaits), turning a
+	// suite that hangs to the test deadline into one that fails immediately
+	// and says why.
 	now   func() time.Time
 	sleep func(time.Duration)
 }
+
+// maxNonAdvancingWaits bounds how many consecutive sleeps Wait will tolerate
+// without l.now() advancing before it declares the clock broken. It is not 1
+// because a real clock is only guaranteed to be non-decreasing, not to have
+// any particular resolution, and a single coincidental repeat reading must not
+// be mistaken for a frozen clock. Under a genuinely frozen clock the sleep
+// hook is invariably a no-op too, so the whole budget is spent in microseconds.
+const maxNonAdvancingWaits = 100
 
 // NewRateLimiter creates a limiter allowing `rate` requests per second with
 // a burst capacity of `burst` (coerced up to at least 1). The bucket starts
@@ -51,6 +66,10 @@ func (l *RateLimiter) Wait() {
 	if l == nil {
 		return
 	}
+	// Consecutive passes whose sleep did not move the clock. Local to this
+	// caller: a shared counter would let two goroutines' unrelated passes add
+	// up to a false positive.
+	stalled := 0
 	for {
 		l.mu.Lock()
 		l.refillLocked()
@@ -65,7 +84,21 @@ func (l *RateLimiter) Wait() {
 		if wait <= 0 {
 			wait = time.Millisecond
 		}
+
+		// Read the clock around the sleep rather than tracking l.lastRefill,
+		// which another goroutine's refill can move even when time has not.
+		before := l.now()
 		l.sleep(wait)
+		if l.now().After(before) {
+			stalled = 0
+			continue
+		}
+		stalled++
+		if stalled >= maxNonAdvancingWaits {
+			panic("resolver: RateLimiter.Wait: the bucket is empty and the clock is not advancing, " +
+				"so no token can ever be refilled — a test has stubbed the now/sleep hooks such that " +
+				"time cannot pass while draining the bucket")
+		}
 	}
 }
 

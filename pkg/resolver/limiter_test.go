@@ -3,6 +3,7 @@ package resolver
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -114,6 +115,61 @@ func TestRateLimiterConcurrentUseIsRaceFree(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestRateLimiterPanicsWhenTheClockCannotAdvance pins the guard on Wait's only
+// exit condition. Freezing the clock and stubbing sleep to a no-op — the same
+// pair TestDoWithRetryAcquiresLimiterBeforeEachAttempt below uses, which is
+// safe only because it never empties its bucket — leaves Wait with nothing that
+// can ever refill a token. Before the guard this spun hot forever and took the
+// whole suite to the test deadline with it; the requirement is that it
+// terminates, and a panic naming the cause is the fastest thing to diagnose.
+func TestRateLimiterPanicsWhenTheClockCannotAdvance(t *testing.T) {
+	l := NewRateLimiter(10, 1)
+	l.sleep = func(time.Duration) {}
+	frozen := time.Now()
+	l.now = func() time.Time { return frozen }
+
+	l.Wait() // spends the single burst token; no wait needed, so no panic
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Wait on an empty bucket under a frozen clock returned normally, want a panic")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "clock is not advancing") {
+			t.Errorf("panic value = %v, want a string naming the non-advancing clock", r)
+		}
+	}()
+	l.Wait() // bucket empty and time cannot pass: unsatisfiable
+}
+
+// A clock that advances only in coarse jumps must not be mistaken for a frozen
+// one: Wait tolerates repeat readings and only gives up after a run of them, so
+// a limiter whose clock ticks once per several passes still resolves normally.
+func TestRateLimiterToleratesACoarseClock(t *testing.T) {
+	l := NewRateLimiter(10, 1)
+	start := time.Now()
+	ticks := 0
+	// Advance a tenth of a second (one token at rate 10) every third reading.
+	l.now = func() time.Time {
+		ticks++
+		return start.Add(time.Duration(ticks/3) * 100 * time.Millisecond)
+	}
+	l.sleep = func(time.Duration) {}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Wait()
+		l.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return under a coarse but advancing clock")
+	}
 }
 
 func TestDoWithRetryAcquiresLimiterBeforeEachAttempt(t *testing.T) {
