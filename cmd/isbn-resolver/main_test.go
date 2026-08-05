@@ -803,3 +803,48 @@ func TestRetryWarnerIsConcurrencySafe(t *testing.T) {
 		}
 	}
 }
+
+// TestNewAPIClientCarriesTheGoogleBooksAPIKey closes the last gap in the key's
+// path: config can hold it and the client can send it, but neither matters if
+// main forgets to hand it over. That is exactly how APIClient.Limiter stayed
+// nil in production for so long, so it is worth a test of its own.
+func TestNewAPIClientCarriesTheGoogleBooksAPIKey(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.GoogleBooksAPIKey = "configured-key"
+
+	if got := newAPIClient(cfg).GoogleBooksAPIKey; got != "configured-key" {
+		t.Errorf("GoogleBooksAPIKey = %q, want %q", got, "configured-key")
+	}
+
+	// The unset case is the default experience and must stay anonymous rather
+	// than picking up a placeholder.
+	if got := newAPIClient(config.DefaultConfig()).GoogleBooksAPIKey; got != "" {
+		t.Errorf("GoogleBooksAPIKey = %q with none configured, want empty", got)
+	}
+}
+
+// The flag exists for one-off runs, but it is the least private source, so the
+// precedence merge has to honour it for the same reason it honours every other
+// flag: it describes this invocation, while the environment describes all of
+// them. Without an entry in cliFlags.apply it would be silently dropped
+// whenever --config is also passed.
+func TestGoogleBooksAPIKeyFlagOutranksTheEnvironment(t *testing.T) {
+	t.Setenv("ISBN_GOOGLE_BOOKS_API_KEY", "env-key")
+
+	cfg, err := parseArgs(t, "--google-books-api-key", "flag-key").resolveConfig()
+	if err != nil {
+		t.Fatalf("resolveConfig() error = %v", err)
+	}
+	if cfg.GoogleBooksAPIKey != "flag-key" {
+		t.Errorf("GoogleBooksAPIKey = %q, want %q", cfg.GoogleBooksAPIKey, "flag-key")
+	}
+
+	// With no flag passed, the environment must still come through.
+	cfg, err = parseArgs(t).resolveConfig()
+	if err != nil {
+		t.Fatalf("resolveConfig() error = %v", err)
+	}
+	if cfg.GoogleBooksAPIKey != "env-key" {
+		t.Errorf("GoogleBooksAPIKey = %q, want %q", cfg.GoogleBooksAPIKey, "env-key")
+	}
+}

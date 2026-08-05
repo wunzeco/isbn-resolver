@@ -658,3 +658,81 @@ func TestUnmarshalJSON(t *testing.T) {
 		t.Errorf("Expected sheets_range, got %s", cfg.SheetsRange)
 	}
 }
+
+// The API key is a credential, so the environment variable is the source we
+// most expect people to use — it keeps the key out of shell history, out of
+// `ps`, and off disk. It must also stay optional: an unset variable leaves the
+// anonymous behaviour the tool has always had.
+func TestLoadFromEnvGoogleBooksAPIKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		initial string
+		want    string
+	}{
+		{
+			name: "unset leaves the key empty",
+			want: "",
+		},
+		{
+			name: "set is adopted",
+			env:  "env-key",
+			want: "env-key",
+		},
+		{
+			// Consistent with every other ISBN_* variable: an empty value is
+			// treated as "unset" rather than as an explicit blank, so it cannot
+			// silently wipe a key a config file supplied.
+			name:    "empty does not clear a configured key",
+			initial: "file-key",
+			want:    "file-key",
+		},
+		{
+			// Environment outranks the config file, matching the documented
+			// precedence order (defaults < file < env < explicit flags).
+			name:    "set overrides a config-file key",
+			env:     "env-key",
+			initial: "file-key",
+			want:    "env-key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ISBN_GOOGLE_BOOKS_API_KEY", tt.env)
+
+			cfg := DefaultConfig()
+			cfg.GoogleBooksAPIKey = tt.initial
+			cfg.LoadFromEnv()
+
+			if cfg.GoogleBooksAPIKey != tt.want {
+				t.Errorf("GoogleBooksAPIKey = %q, want %q", cfg.GoogleBooksAPIKey, tt.want)
+			}
+		})
+	}
+}
+
+// A config file is the third way to supply the key, for people who would rather
+// keep it with the rest of their settings than export it every session.
+func TestLoadFromFileGoogleBooksAPIKey(t *testing.T) {
+	cfg, err := LoadFromFile(writeConfig(t, `{"google_books_api_key": "file-key"}`))
+	if err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+	if cfg.GoogleBooksAPIKey != "file-key" {
+		t.Errorf("GoogleBooksAPIKey = %q, want %q", cfg.GoogleBooksAPIKey, "file-key")
+	}
+
+	// Omitting the key must not become an error or a non-empty placeholder:
+	// running without a Google account has to stay the default experience.
+	anon, err := LoadFromFile(writeConfig(t, `{"concurrency": 3}`))
+	if err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+	if anon.GoogleBooksAPIKey != "" {
+		t.Errorf("GoogleBooksAPIKey = %q with the key omitted, want empty", anon.GoogleBooksAPIKey)
+	}
+	if err := anon.Validate(); err != nil {
+		t.Errorf("Validate() rejected a config with no API key: %v", err)
+	}
+}

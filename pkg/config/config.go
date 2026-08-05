@@ -124,6 +124,16 @@ type Config struct {
 	RetryFailed bool      `json:"retry_failed"`
 	NoCache     bool      `json:"no_cache"`
 	RateLimit   RateLimit `json:"rate_limit"`
+
+	// GoogleBooksAPIKey, when set, is sent as the `key` query parameter on
+	// every Google Books request, moving the run off Google's shared
+	// anonymous per-IP quota and onto a registered project's much higher one.
+	// Exhausting the anonymous quota is what made 74 of a 489-ISBN sample look
+	// like genuine catalog gaps (specs/third-fallback-api.md §0).
+	//
+	// It is optional by design: empty means today's anonymous behaviour, so
+	// the tool never requires an account to run.
+	GoogleBooksAPIKey string `json:"google_books_api_key"`
 }
 
 // DefaultConfig returns the default configuration
@@ -232,6 +242,13 @@ func (c *Config) LoadFromEnv() {
 
 	if cacheFile := os.Getenv("ISBN_CACHE_FILE"); cacheFile != "" {
 		c.CacheFile = cacheFile
+	}
+
+	// An environment variable is the safest of the three sources for a
+	// credential: unlike a flag it does not land in the shell history or in
+	// `ps` output, and unlike a config file it need not be written to disk.
+	if key := os.Getenv("ISBN_GOOGLE_BOOKS_API_KEY"); key != "" {
+		c.GoogleBooksAPIKey = key
 	}
 
 	// A non-numeric or non-positive worker count is ignored rather than

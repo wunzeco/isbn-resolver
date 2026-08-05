@@ -233,6 +233,13 @@ func registerFlags(fs *flag.FlagSet) *cliFlags {
 	fs.BoolVar(&cfg.RetryFailed, "retry-failed", cfg.RetryFailed, "Reuse cached successes but re-attempt cached failures")
 	fs.BoolVar(&cfg.NoCache, "no-cache", cfg.NoCache, "Bypass the cache entirely for this run")
 
+	// Optional Google Books credential. The flag is the least private of the
+	// three sources — it lands in shell history and in `ps` output — so its
+	// help text points at ISBN_GOOGLE_BOOKS_API_KEY for anything but a
+	// one-off. Unset means query anonymously, as the tool always has.
+	fs.StringVar(&cfg.GoogleBooksAPIKey, "google-books-api-key", cfg.GoogleBooksAPIKey,
+		"Google Books API key (optional; prefer ISBN_GOOGLE_BOOKS_API_KEY, which avoids shell history and ps)")
+
 	c.apply = map[string]func(*config.Config){
 		"timeout":            func(dst *config.Config) { dst.Timeout = cfg.Timeout },
 		"file":               func(dst *config.Config) { dst.InputFile = cfg.InputFile },
@@ -253,6 +260,9 @@ func registerFlags(fs *flag.FlagSet) *cliFlags {
 		"resolve-all":       func(dst *config.Config) { dst.ResolveAll = cfg.ResolveAll },
 		"retry-failed":      func(dst *config.Config) { dst.RetryFailed = cfg.RetryFailed },
 		"no-cache":          func(dst *config.Config) { dst.NoCache = cfg.NoCache },
+		"google-books-api-key": func(dst *config.Config) {
+			dst.GoogleBooksAPIKey = cfg.GoogleBooksAPIKey
+		},
 	}
 
 	return c
@@ -366,6 +376,11 @@ func newAPIClient(cfg *config.Config) *resolver.APIClient {
 	client.MaxRetries = cfg.RateLimit.MaxRetries
 	client.BaseBackoff = time.Duration(cfg.RateLimit.BaseBackoff)
 	client.Limiter = resolver.NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst)
+
+	// Empty is the normal case and means anonymous Google Books requests; the
+	// key only ever raises the quota the run draws on, so a missing one must
+	// never be fatal (specs/third-fallback-api.md §0).
+	client.GoogleBooksAPIKey = cfg.GoogleBooksAPIKey
 
 	return client
 }
