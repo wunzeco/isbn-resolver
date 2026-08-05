@@ -98,6 +98,38 @@ rather than quota exhaustion — the current failing-ISBN list is contaminated
 by the bug and cannot yet be used to decide between the two candidate APIs
 in §2 with confidence.
 
+**Confirmed 2026-08-05, with the limiter fix live and a Google Books API key
+tested directly (out-of-band, ahead of the code implementing key support):**
+
+- The limiter fix alone (shipped) did **not** change the failure set at all —
+  re-running the full 489-ISBN sample produced the identical 74 unique
+  failures. Verbose output showed 222 "rate limited by Google Books" retry
+  warnings; a direct probe confirmed Google Books was still returning 429 for
+  every one of the 74. The quota exhaustion is not a short burst window that
+  pacing fixes — it is a longer-lived (apparently daily) per-IP quota that
+  had already been spent by repeated testing.
+- Querying Google Books directly **with an API key** for all 74 previously-
+  failing ISBNs (bypassing the anonymous quota entirely) found: **50 resolve
+  immediately**, 8 hit a transient 503 and were retried, of which **3 more
+  resolve** and 5 confirm no data. Final tally: **53 of 74 (71.6%) actually
+  have Google Books data** — the API key, not the limiter, was the fix that
+  mattered. **21 of 74 (28.4%) are genuinely absent from both APIs.**
+- **True dual-API-miss rate: 21/488 ≈ 4.3%**, not the original 76/488
+  (15.6%). Adding the API key alone — no third API tier — recovers the large
+  majority of the originally-reported gap.
+- The remaining 21 genuine misses show a rough pattern: five sequential
+  `978-0-1801042-0xx` ISBNs (one publisher's block), two `978-5` (Russian-
+  language imprint) titles, and several `978-0-241` (Penguin) / `978-0-746`
+  (Usborne) ISBNs — an odd miss for major publishers, possibly audiobook-only
+  editions or very recent releases not yet indexed by either catalog.
+- **Implication for §2:** with the API key implemented (still queued in
+  `IMPLEMENTATION_PLAN.md`), the LC-vs-ISBNdb decision should be re-evaluated
+  against a ~4.3% true gap, not 15.6% — a materially weaker case for taking
+  on either candidate's cost (MARC parsing for LC, or a paid subscription for
+  ISBNdb). Recommend treating §2–§4 as on hold pending an explicit decision
+  once the key is live in code and the plan's own "Re-measure the failure
+  rate" item runs its official, in-code measurement.
+
 ### 1. Investigation (must happen before picking the third API)
 
 Do this first — it determines which of §2's two candidate APIs is worth
