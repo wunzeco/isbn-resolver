@@ -321,7 +321,9 @@ Create a JSON configuration file:
   "sheet_cache": false,
   "rate_limit": {
     "max_retries": 3,
-    "base_backoff": "500ms"
+    "base_backoff": "500ms",
+    "requests_per_second": 5,
+    "burst": 5
   }
 }
 ```
@@ -330,6 +332,18 @@ Use it with:
 ```bash
 isbn-resolver --config config.json --file isbns.txt
 ```
+
+The `rate_limit` block has two halves. `max_retries` and `base_backoff` are
+*reactive*: they govern how a request that already got a `429`/`503` backs off
+before trying again. `requests_per_second` and `burst` are *proactive*: they are
+the rate and capacity of a single token bucket shared by every worker, which
+paces the run so it avoids provoking a `429` in the first place. The defaults
+above pair with the default `concurrency` of 5 — roughly one request per worker
+per second, with a full pool able to start at once.
+
+Setting `"requests_per_second": 0` means **unlimited** — an explicit opt-out of
+pacing, useful when pointing the tool at a local fixture server. A negative rate
+is rejected, as is a `burst` below 1.
 
 A `google_books_api_key` key is also accepted, but is deliberately absent from
 the examples above and from `examples/config.json`: a config file is copied

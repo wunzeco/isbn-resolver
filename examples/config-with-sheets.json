@@ -13,6 +13,8 @@
   "sheet_cache": true,
   "rate_limit": {
     "max_retries": 3,
-    "base_backoff": "500ms"
+    "base_backoff": "500ms",
+    "requests_per_second": 5,
+    "burst": 5
   }
 }
