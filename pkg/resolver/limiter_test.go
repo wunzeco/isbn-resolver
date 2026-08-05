@@ -142,7 +142,7 @@ func TestDoWithRetryAcquiresLimiterBeforeEachAttempt(t *testing.T) {
 	// Assert the observable effect of the limiter being acquired on every
 	// attempt: doWithRetry still succeeds with a limiter attached, and the
 	// limiter's bucket was drawn down by the expected number of attempts.
-	resp, err := client.doWithRetry(func() (*http.Response, error) {
+	resp, err := client.doWithRetry(APIOpenLibrary, "9780134190440", func() (*http.Response, error) {
 		waits++
 		return client.httpClient.Get(server.URL)
 	})

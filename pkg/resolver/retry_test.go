@@ -33,7 +33,7 @@ func TestDoWithRetryRetriesOn429ThenSucceeds(t *testing.T) {
 
 	client, delays := newTestClient()
 
-	resp, err := client.doWithRetry(func() (*http.Response, error) {
+	resp, err := client.doWithRetry(APIOpenLibrary, "9780134190440", func() (*http.Response, error) {
 		return client.httpClient.Get(server.URL)
 	})
 	if err != nil {
@@ -74,7 +74,7 @@ func TestDoWithRetryHonoursRetryAfterHeader(t *testing.T) {
 
 	client, delays := newTestClient()
 
-	resp, err := client.doWithRetry(func() (*http.Response, error) {
+	resp, err := client.doWithRetry(APIOpenLibrary, "9780134190440", func() (*http.Response, error) {
 		return client.httpClient.Get(server.URL)
 	})
 	if err != nil {
@@ -100,7 +100,7 @@ func TestDoWithRetryDoesNotRetry404(t *testing.T) {
 
 	client, delays := newTestClient()
 
-	resp, err := client.doWithRetry(func() (*http.Response, error) {
+	resp, err := client.doWithRetry(APIOpenLibrary, "9780134190440", func() (*http.Response, error) {
 		return client.httpClient.Get(server.URL)
 	})
 	if err != nil {
@@ -130,7 +130,7 @@ func TestDoWithRetryStopsAfterMaxRetries(t *testing.T) {
 	client, delays := newTestClient()
 	client.MaxRetries = 2
 
-	resp, err := client.doWithRetry(func() (*http.Response, error) {
+	resp, err := client.doWithRetry(APIOpenLibrary, "9780134190440", func() (*http.Response, error) {
 		return client.httpClient.Get(server.URL)
 	})
 	if err != nil {
@@ -213,5 +213,137 @@ func TestFetchFromOpenLibraryRetriesThenParses(t *testing.T) {
 	}
 	if len(*delays) != 2 {
 		t.Errorf("recorded %d delays, want 2", len(*delays))
+	}
+}
+
+// The verbose "Warning: rate limited by ..." line is the only signal that a
+// run is sleeping off a backoff rather than hung, so every retry must be
+// reported — and reported before the sleep, not after it.
+func TestDoWithRetryReportsEveryRetryThroughOnRetry(t *testing.T) {
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, _ := newTestClient()
+
+	// Recording the notice inside the sleep stub too would be fragile, so
+	// instead assert ordering by counting sleeps seen at notice time: a
+	// notice must always arrive before its own sleep.
+	var sleepsAtNotice []int
+	var sleeps int
+	realSleep := client.sleep
+	client.sleep = func(d time.Duration) {
+		sleeps++
+		realSleep(d)
+	}
+
+	var notices []RetryNotice
+	client.OnRetry = func(n RetryNotice) {
+		notices = append(notices, n)
+		sleepsAtNotice = append(sleepsAtNotice, sleeps)
+	}
+
+	resp, err := client.doWithRetry(APIOpenLibrary, "9780596520687", func() (*http.Response, error) {
+		return client.httpClient.Get(server.URL)
+	})
+	if err != nil {
+		t.Fatalf("doWithRetry returned error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if len(notices) != 2 {
+		t.Fatalf("got %d notices, want 2 (one per retry)", len(notices))
+	}
+	want := []RetryNotice{
+		{API: APIOpenLibrary, ISBN: "9780596520687", StatusCode: 429, Attempt: 1, MaxRetries: 3, Delay: 500 * time.Millisecond},
+		{API: APIOpenLibrary, ISBN: "9780596520687", StatusCode: 429, Attempt: 2, MaxRetries: 3, Delay: 1 * time.Second},
+	}
+	for i, n := range notices {
+		if n != want[i] {
+			t.Errorf("notice[%d] = %+v, want %+v", i, n, want[i])
+		}
+		if sleepsAtNotice[i] != i {
+			t.Errorf("notice[%d] fired after %d sleeps, want %d — the warning must precede its own backoff", i, sleepsAtNotice[i], i)
+		}
+	}
+}
+
+// A response that is never retried must stay silent: a warning about a
+// retry that did not happen would be worse than no warning at all.
+func TestDoWithRetryReportsNothingWhenNotRetried(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, _ := newTestClient()
+	var notices int
+	client.OnRetry = func(RetryNotice) { notices++ }
+
+	resp, err := client.doWithRetry(APIOpenLibrary, "9780134190440", func() (*http.Response, error) {
+		return client.httpClient.Get(server.URL)
+	})
+	if err != nil {
+		t.Fatalf("doWithRetry returned error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if notices != 0 {
+		t.Errorf("got %d notices for a non-retryable 404, want 0", notices)
+	}
+}
+
+// doWithRetry takes an opaque fn, so the API name can only be right if each
+// fetchFrom* caller passes its own. Google Books must not be reported as
+// Open Library.
+func TestFetchFromGoogleBooksNamesItselfInRetryNotice(t *testing.T) {
+	var attempts int
+	googleBooks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"totalItems": 1,
+			"items": []map[string]interface{}{
+				{"volumeInfo": map[string]interface{}{"title": "Programming Erlang"}},
+			},
+		})
+	}))
+	defer googleBooks.Close()
+
+	client, _ := newTestClient()
+	client.GoogleBooksBaseURL = googleBooks.URL
+
+	var notices []RetryNotice
+	client.OnRetry = func(n RetryNotice) { notices = append(notices, n) }
+
+	if _, err := client.fetchFromGoogleBooks("9780596518189"); err != nil {
+		t.Fatalf("fetchFromGoogleBooks returned error: %v", err)
+	}
+
+	if len(notices) != 1 {
+		t.Fatalf("got %d notices, want 1", len(notices))
+	}
+	if notices[0].API != APIGoogleBooks {
+		t.Errorf("API = %q, want %q", notices[0].API, APIGoogleBooks)
+	}
+	if notices[0].ISBN != "9780596518189" {
+		t.Errorf("ISBN = %q, want %q", notices[0].ISBN, "9780596518189")
+	}
+	// An honoured Retry-After must be what the warning reports, not the
+	// backoff it overrode.
+	if notices[0].Delay != 2*time.Second {
+		t.Errorf("Delay = %v, want 2s (the Retry-After value)", notices[0].Delay)
 	}
 }

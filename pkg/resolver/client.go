@@ -29,6 +29,37 @@ const (
 	defaultMaxRetries         = 3
 )
 
+// Human-readable names for the upstream APIs, used to say which one rate
+// limited us. doWithRetry takes an opaque fn and cannot infer the API from
+// it, so the fetchFrom* callers name themselves.
+const (
+	APIOpenLibrary = "Open Library"
+	APIGoogleBooks = "Google Books"
+)
+
+// RetryNotice describes a retry that is about to happen: the upstream
+// returned a retryable status and the client is about to sleep Delay before
+// re-issuing the request. It carries everything the verbose progress line
+// needs, so the presentation of the message stays in the CLI rather than in
+// the resolver.
+type RetryNotice struct {
+	// API is the upstream that rate limited us (APIOpenLibrary or APIGoogleBooks).
+	API string
+	// ISBN is the ISBN being resolved when the limit was hit.
+	ISBN string
+	// StatusCode is the retryable status that triggered the wait (429 or 503).
+	StatusCode int
+	// Attempt is 1-based: 1 is the first retry, i.e. the response to the
+	// initial request was retryable.
+	Attempt int
+	// MaxRetries is the ceiling Attempt counts towards, so a consumer can
+	// render "attempt 1/3" without reaching back into the client.
+	MaxRetries int
+	// Delay is how long the client will wait before the next attempt,
+	// either the computed backoff+jitter or an honoured Retry-After.
+	Delay time.Duration
+}
+
 // APIClient handles API requests to book metadata services
 type APIClient struct {
 	httpClient         *http.Client
@@ -50,6 +81,16 @@ type APIClient struct {
 	// APIClient (or assign the same *RateLimiter to each client) so the
 	// limit applies across all of them, per spec §4.
 	Limiter *RateLimiter
+
+	// OnRetry, when set, is called once per retry, immediately before the
+	// backoff sleep — so a long wait is reported as it starts rather than
+	// after it finishes, which is the whole point of the progress line.
+	// It is nil by default (silent).
+	//
+	// resolveISBNs shares one APIClient across every pool worker, so this
+	// is called from multiple goroutines concurrently and any
+	// implementation must be safe for concurrent use.
+	OnRetry func(RetryNotice)
 
 	// sleep and jitter are overridable in tests so retry tests don't
 	// actually wait out real backoff delays.
@@ -94,7 +135,7 @@ func (c *APIClient) Resolve(isbn string) (*BookMetadata, error) {
 func (c *APIClient) fetchFromOpenLibrary(isbn string) (*BookMetadata, error) {
 	apiURL := fmt.Sprintf("%s/api/books?bibkeys=ISBN:%s&format=json&jscmd=data", c.OpenLibraryBaseURL, isbn)
 
-	resp, err := c.doWithRetry(func() (*http.Response, error) {
+	resp, err := c.doWithRetry(APIOpenLibrary, isbn, func() (*http.Response, error) {
 		return c.httpClient.Get(apiURL)
 	})
 	if err != nil {
@@ -176,7 +217,7 @@ func (c *APIClient) fetchFromOpenLibrary(isbn string) (*BookMetadata, error) {
 func (c *APIClient) fetchFromGoogleBooks(isbn string) (*BookMetadata, error) {
 	apiURL := fmt.Sprintf("%s/volumes?q=isbn:%s", c.GoogleBooksBaseURL, url.QueryEscape(isbn))
 
-	resp, err := c.doWithRetry(func() (*http.Response, error) {
+	resp, err := c.doWithRetry(APIGoogleBooks, isbn, func() (*http.Response, error) {
 		return c.httpClient.Get(apiURL)
 	})
 	if err != nil {

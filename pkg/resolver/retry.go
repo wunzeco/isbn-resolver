@@ -39,7 +39,10 @@ func retryDelay(resp *http.Response, base time.Duration, attempt int, jitter fun
 // per retryDelay. A transport-level error (fn returning err != nil) is not
 // retried here and is returned immediately. Non-retryable status codes
 // (e.g. 404) are returned on the first attempt with no retry.
-func (c *APIClient) doWithRetry(fn func() (*http.Response, error)) (*http.Response, error) {
+//
+// api and isbn are carried purely so a retry can be reported through
+// OnRetry: fn is an opaque closure, so neither can be recovered from it.
+func (c *APIClient) doWithRetry(api, isbn string, fn func() (*http.Response, error)) (*http.Response, error) {
 	maxRetries := c.MaxRetries
 	base := c.BaseBackoff
 	if base <= 0 {
@@ -56,6 +59,16 @@ func (c *APIClient) doWithRetry(fn func() (*http.Response, error)) (*http.Respon
 			return resp, nil
 		}
 		delay := retryDelay(resp, base, attempt, func() time.Duration { return c.jitter(base) })
+		if c.OnRetry != nil {
+			c.OnRetry(RetryNotice{
+				API:        api,
+				ISBN:       isbn,
+				StatusCode: resp.StatusCode,
+				Attempt:    attempt + 1,
+				MaxRetries: maxRetries,
+				Delay:      delay,
+			})
+		}
 		resp.Body.Close()
 		c.sleep(delay)
 	}
