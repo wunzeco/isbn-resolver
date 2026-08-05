@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -833,6 +835,36 @@ type exampleConfig struct {
 	omitted []string
 }
 
+var (
+	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+)
+
+// marshalsAsScalar reports whether values of typ encode as a single JSON value
+// of their own rather than as an object of their fields — i.e. whether
+// configJSONKeys must treat the field as a leaf.
+//
+// Kind alone cannot answer this. Config gets away with a kind check today only
+// because its one custom-marshalling type (Duration) happens to be a named
+// integer; a struct with the same MarshalJSON — time.Time being the obvious
+// one — would be walked into, and the test would then demand example-config
+// keys like "some_field.inner" that can never exist in a file.
+//
+// Both the value and the pointer form are checked because encoding/json uses a
+// pointer-receiver MarshalJSON whenever the value it reaches is addressable,
+// which a struct field is when the parent is marshalled through a pointer.
+// TextMarshaler counts too: encoding/json renders such a type as a JSON string,
+// which is just as much a scalar as MarshalJSON's output.
+func marshalsAsScalar(typ reflect.Type) bool {
+	ptr := reflect.PointerTo(typ)
+	for _, iface := range []reflect.Type{jsonMarshalerType, textMarshalerType} {
+		if typ.Implements(iface) || ptr.Implements(iface) {
+			return true
+		}
+	}
+	return false
+}
+
 // configJSONKeys returns every JSON key on Config, flattening nested objects
 // into "parent.child" form. Derived by reflection rather than listed, so a new
 // field cannot be added to Config without this test noticing it.
@@ -850,7 +882,7 @@ func configJSONKeys(t *testing.T, typ reflect.Type) []string {
 		// Only struct fields that are *not* their own JSON scalar recurse.
 		// Duration is a named integer type with custom marshalling, so it is
 		// a leaf despite not being a plain builtin.
-		if field.Type.Kind() == reflect.Struct {
+		if field.Type.Kind() == reflect.Struct && !marshalsAsScalar(field.Type) {
 			for _, nested := range configJSONKeys(t, field.Type) {
 				keys = append(keys, name+"."+nested)
 			}
@@ -859,6 +891,85 @@ func configJSONKeys(t *testing.T, typ reflect.Type) []string {
 		keys = append(keys, name)
 	}
 	return keys
+}
+
+// The three fixtures below stand in for the shapes Config does not currently
+// contain but could gain at any time. They are local to the test on purpose:
+// proving configJSONKeys handles them by adding a field to Config would mean
+// shipping a field the tool does not need.
+
+// valueScalar marshals to a JSON string from a value receiver.
+type valueScalar struct {
+	Whole int `json:"whole"`
+	Frac  int `json:"frac"`
+}
+
+func (v valueScalar) MarshalJSON() ([]byte, error) {
+	return json.Marshal(fmt.Sprintf("%d.%d", v.Whole, v.Frac))
+}
+
+// pointerScalar marshals to a JSON number from a *pointer* receiver, the case a
+// typ.Implements check alone would miss.
+type pointerScalar struct {
+	N int `json:"n"`
+}
+
+func (p *pointerScalar) MarshalJSON() ([]byte, error) { return json.Marshal(p.N) }
+
+// textScalar reaches JSON as a string via encoding.TextMarshaler rather than
+// json.Marshaler.
+type textScalar struct {
+	Word string `json:"word"`
+}
+
+func (t textScalar) MarshalText() ([]byte, error) { return []byte(t.Word), nil }
+
+// plainNested has no custom marshalling and must still be flattened, so the
+// scalar check cannot be so broad that it swallows the ordinary case.
+type plainNested struct {
+	Inner string `json:"inner"`
+}
+
+// TestConfigJSONKeysTreatsScalarStructsAsLeaves pins the rule that decides
+// whether a Config field contributes one key or several.
+//
+// TestExampleConfigsMatchDefaults requires every key configJSONKeys returns to
+// be present in the example files. So a struct field wrongly recursed into
+// would demand keys like "issued.whole" that the file cannot supply — the
+// examples would be declared stale and the only way to "fix" them would be to
+// write nested objects that LoadFromFile then rejects. The failure is remote
+// from its cause, which is why the rule is tested directly here rather than
+// left to be discovered the next time someone adds a time.Time.
+func TestConfigJSONKeysTreatsScalarStructsAsLeaves(t *testing.T) {
+	type fixture struct {
+		Value   valueScalar   `json:"value"`
+		Pointer pointerScalar `json:"pointer"`
+		Text    textScalar    `json:"text"`
+		Nested  plainNested   `json:"nested"`
+		Dur     Duration      `json:"dur"`
+		Plain   string        `json:"plain"`
+	}
+
+	// Marshal through a pointer: a pointer-receiver MarshalJSON is only reached
+	// when the field is addressable, which is also how LoadFromFile's round trip
+	// sees a Config.
+	encoded, err := json.Marshal(&fixture{})
+	if err != nil {
+		t.Fatalf("Failed to marshal fixture: %v", err)
+	}
+	// Asserting the real encoding keeps the fixtures honest — without it a
+	// fixture could stop marshalling as a scalar and the test below would go on
+	// asserting the wrong expectation.
+	const wantJSON = `{"value":"0.0","pointer":0,"text":"","nested":{"inner":""},"dur":"0s","plain":""}`
+	if string(encoded) != wantJSON {
+		t.Fatalf("fixture encodes as %s, want %s", encoded, wantJSON)
+	}
+
+	want := []string{"value", "pointer", "text", "nested.inner", "dur", "plain"}
+	got := configJSONKeys(t, reflect.TypeOf(fixture{}))
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("configJSONKeys() = %v, want %v", got, want)
+	}
 }
 
 // fileJSONKeys returns the keys actually present in a config file, in the same
