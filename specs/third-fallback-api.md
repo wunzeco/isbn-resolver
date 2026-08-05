@@ -3,8 +3,9 @@
 ## Feature Overview
 
 ~~~15% of a 488-ISBN sample fails to resolve against the current two-tier
-fallback (Open Library, then Google Books).~~ **Superseded — see the
-measurement below.** Add a third API tier to recover some of that failure
+fallback (Open Library, then Google Books).~~ **Superseded — both figures
+were wrong: the sample is 490 rows / 477 unique ISBNs, and the true rate is
+4.4%. See the measurement below.** Add a third API tier to recover some of that failure
 rate, choosing the specific API based on evidence from the actual failing
 ISBNs rather than guessing.
 
@@ -15,6 +16,28 @@ originally-reported gap was overwhelmingly Google Books quota exhaustion, not
 missing catalog data. Every count below predating "Re-measurement (2026-08-05,
 official)" in §1 is a superseded historical figure, retained to show how the
 number moved.
+
+**Sample size audit (2026-08-06, canonical).** Every ISBN count in this
+document has been re-checked against `examples/ISBNs.csv` itself. These are
+the canonical figures and the only ones that should be quoted going forward:
+
+| Figure | Value | How to reproduce |
+|---|---|---|
+| Content lines | 491 | `tr -d '\r' < examples/ISBNs.csv \| grep -c ''` |
+| Header rows | 1 (`ISBN`) | first line; skipped by `scanISBNs` |
+| ISBN rows | **490** | pinned by `TestGetISBNsOnTheMeasurementSample` (`cmd/isbn-resolver/main_test.go`) |
+| Unique ISBNs | **477** | 13 duplicate rows across 12 ISBNs, one of which appears three times |
+| Genuinely unresolvable, post-§0 | **21** (4.4% of 477) | §1 "Re-measurement (2026-08-05, official)" |
+
+`wc -l` reports 490 for this file — CRLF endings with no trailing newline mean
+the final line goes uncounted — which is where the 489 figure came from, and
+the header row was counted as an ISBN on top of that, which is where 488 and
+the inflated failure numerators came from. **Every appearance of 488, 489,
+475, 76/488, 15.6% or ~15% below is superseded.** (15.5% is *not* superseded:
+it is the corrected pre-fix rate, 74/477.) They are annotated in place
+rather than rewritten, because only the pre-fix run can say what the pre-fix
+run measured — the record of how the number moved is worth more than a
+document that reads as though it were always right.
 
 **Decision (2026-08-05, final): no third tier.** The project owner reviewed
 the 4.4% residual and decided it does not justify either candidate's cost —
@@ -60,9 +83,9 @@ same shape.
 
 ### 0. Prerequisite: fix two likely-inflating bugs before building anything (do this first)
 
-Running the resolver against `examples/ISBNs.csv` (489 ISBNs, 74 unique
-failures, 15.6% — matching the reported rate) and probing both APIs
-directly for each failing ISBN found:
+Running the resolver against `examples/ISBNs.csv` (~~489 ISBNs~~ 490 rows /
+477 unique, 74 unique failures, ~~15.6%~~ 15.5% of unique — matching the
+reported rate) and probing both APIs directly for each failing ISBN found:
 
 - **Open Library genuinely has no data** for all 74 failing ISBNs
   (confirmed via direct `api/books?bibkeys=...` calls) — not a bug.
@@ -109,7 +132,9 @@ Two concrete bugs are very likely contributing to that quota exhaustion:
   when configured and omitted when not, and a re-run of
   `examples/ISBNs.csv` (once Google Books' quota for this environment
   resets, or using a valid API key) produces a measurably different
-  failure count than the current 76/488 baseline.
+  failure count than the current ~~76/488~~ 74/477-unique baseline (the 76
+  counted failing *rows*, one of which was the header line; superseded per
+  the sample size audit).
 
 This step **must** complete, with a fresh measurement recorded, before §1's
 investigation numbers below are treated as reflecting genuine data gaps
@@ -129,7 +154,7 @@ The official in-code run has since reproduced this out-of-band probe exactly —
 same 21 residual ISBNs, same 53 recovered by Google Books:**
 
 - The limiter fix alone (shipped) did **not** change the failure set at all —
-  re-running the full ~~489~~-ISBN (490) sample produced the identical 74 unique
+  re-running the full ~~489~~ 490-row (477 unique) sample produced the identical 74 unique
   failures. Verbose output showed 222 "rate limited by Google Books" retry
   warnings; a direct probe confirmed Google Books was still returning 429 for
   every one of the 74. The quota exhaustion is not a short burst window that
@@ -141,18 +166,24 @@ same 21 residual ISBNs, same 53 recovered by Google Books:**
   resolve** and 5 confirm no data. Final tally: **53 of 74 (71.6%) actually
   have Google Books data** — the API key, not the limiter, was the fix that
   mattered. **21 of 74 (28.4%) are genuinely absent from both APIs.**
-- **True dual-API-miss rate: ~~21/488 ≈ 4.3%~~ → 21/475 unique ≈ 4.4%** (the
-  denominator is corrected below; the numerator held), not the original 76/488
-  (15.6%). Adding the API key alone — no third API tier — recovers the large
-  majority of the originally-reported gap.
+- **True dual-API-miss rate: ~~21/488 ≈ 4.3%~~ ~~21/475~~ → 21/477 unique ≈ 4.4%**
+  (the numerator held throughout; only the denominator moved, and the 475
+  written here was itself a slip for the audited 477), not the original
+  ~~76/488 (15.6%)~~ 74/477 (15.5%). Adding the API key alone — no third API
+  tier — recovers the large majority of the originally-reported gap.
 - The remaining 21 genuine misses show a rough pattern: five sequential
   `978-0-1801042-0xx` ISBNs (one publisher's block), two `978-5` (Russian-
   language imprint) titles, and several `978-0-241` (Penguin) / `978-0-746`
   (Usborne) ISBNs — an odd miss for major publishers, possibly audiobook-only
   editions or very recent releases not yet indexed by either catalog.
+  *(Consistency-checked against the sample 2026-08-06: it contains exactly
+  five unique ISBNs in that block and exactly two `978-5`, so both counts mean
+  "all of them in the sample failed". Note the block is `978-1-801042-0xx`
+  — `9781801042055`–`9781801042109` — not the `978-0-…` written above.
+  "Several" is not checkable: the 21 were never listed individually.)*
 - **Implication for §2:** with the API key implemented (~~still queued in
   `IMPLEMENTATION_PLAN.md`~~ — now shipped), the LC-vs-ISBNdb decision should
-  be re-evaluated against a ~~~4.3%~~ 4.4% true gap, not 15.6% — a materially
+  be re-evaluated against a ~~~4.3%~~ 4.4% true gap, not ~~15.6%~~ 15.5% — a materially
   weaker case for taking on either candidate's cost (MARC parsing for LC, or a
   paid subscription for ISBNdb). Recommend treating §2–§4 as on hold pending an
   explicit decision once the key is live in code and the plan's own
@@ -168,18 +199,24 @@ e.g., a bug in ISBN normalization causing false failures).
 **Correction (2026-08-05): the sample is 490 ISBNs, not 488 or 489.**
 `examples/ISBNs.csv` has CRLF endings and no trailing newline, so `wc -l`
 under-reports it by one. It is 491 content lines = 1 header row + 490 ISBNs,
-of which 477 are unique (13 duplicate rows, not the 2 recorded below). The
-header row was also being fed in as an ISBN until `scanISBNs` learned to skip
-it, so every failure count quoted in this spec has an inflated numerator *and*
-an unreliable denominator. Treat the numbers below as indicative only; the
-plan's re-measurement item supersedes them.
+of which 477 are unique (13 duplicate rows across 12 ISBNs — one appears three
+times — not the 2 recorded below). The header row was also being fed in as an
+ISBN until `scanISBNs` learned to skip it, so every failure count quoted in
+this spec has an inflated numerator *and* an unreliable denominator. Treat the
+numbers below as indicative only; the "Re-measurement (2026-08-05, official)"
+subsection supersedes them, and the sample size audit under Feature Overview
+is the canonical statement of the sample's own figures.
 
 **Status: historical (pre-§0-fix) run, superseded — kept below to show how
 the number moved.** What was known from the first `examples/ISBNs.csv` run,
 before the limiter/API-key bugs were fixed:
 
-- 76/488 rows failed (74 unique ISBNs; 2 duplicate rows in the source
-  file), a 15.6% failure rate, matching the originally reported ~15%.
+- ~~76/488 rows failed (74 unique ISBNs; 2 duplicate rows in the source
+  file), a 15.6% failure rate~~, matching the originally reported ~15%.
+  **Superseded per the sample size audit:** the sample is 490 rows / 477
+  unique with 13 duplicate rows, and one of those 76 failing "rows" was the
+  `ISBN` header line. The unique-ISBN figure that survives the correction is
+  **74/477 = 15.5%**.
 - All 74 fail Open Library with genuine "no data" responses — this part of
   the number is real and will persist regardless of §0's fixes.
 - All 74 also currently fail Google Books with HTTP 429, which per §0 is
@@ -192,6 +229,11 @@ before the limiter/API-key bugs were fixed:
   backlist — these look like plausible genuine catalog gaps rather than
   quota artifacts, but can't be confirmed until Google Books is queryable
   again for this environment.
+  *(Counts checked against the sample 2026-08-06: it holds exactly one `979-8`
+  ISBN, exactly two `978-5`, and 23 unique `978-0-85231-6xxx` — so the 13 that
+  failed here were a little over half of that block, not "the full backlist".
+  Whether any of the three clusters survived into the post-fix 21 is a
+  separate question — see the re-measurement below.)*
 
 **Re-measurement (2026-08-05, official).** With §0's fixes shipped
 (limiter wired, `--google-books-api-key` plumbed through) and
@@ -205,14 +247,22 @@ row excluded by the `scanISBNs` fix):
   Google Books with the API key ahead of the code landing (see the
   "Confirmed 2026-08-05" bullets above §1): same 21 residual ISBNs, same 53
   recovered once the key unblocked Google Books.
-- The `979-8`/`978-5`/sequential-backlist prefix pattern noted above holds
-  up in the final 21 — they are genuine catalog gaps, not quota artifacts.
+- ~~The `979-8`/`978-5`/sequential-backlist prefix pattern noted above holds
+  up in the final 21~~ — **corrected 2026-08-06:** that sentence overstated
+  what was measured. The description of the final 21 recorded above §1 names
+  a *different* sequential block (five `978-0-1801042-0xx`), the same two
+  `978-5`, and "several" `978-0-241`/`978-0-746` — it does not name the
+  `979-8` ISBN or the thirteen `978-0-85231-6xxx`, which the API key
+  therefore appears to have recovered. Only the `978-5` pair is common to
+  both descriptions. The per-ISBN list of the 21 was never written down, so
+  no stronger claim than that is checkable; the clusters are genuine catalog
+  gaps, but *which* clusters is only as precise as the prose above.
 - **Go/no-go for §2:** left to the plan's separate "Categorise the
   genuinely-unresolvable ISBNs and decide LC vs ISBNdb" item — this item's
   scope is the measurement itself, not the resulting API decision.
 
 - Run the resolver's existing `--verbose` output (or a small one-off script
-  reusing `pkg/resolver`) against the full 488-ISBN sample and capture the
+  reusing `pkg/resolver`) against the full ~~488~~ 490-row sample and capture the
   list of ISBNs that fail both Open Library and Google Books, with each
   API's specific error/response (not-found vs. malformed response vs.
   network error).
@@ -321,7 +371,7 @@ See the Decision note under Feature Overview.
      whole `Resolve` call.
 
 2. **Integration Tests**
-   - Re-run the full 488-ISBN sample (or the subset that failed in §1)
+   - Re-run the full ~~488~~ 490-row (477 unique) sample (or the subset that failed in §1)
      through the three-tier resolver and confirm a measurably lower
      failure rate; record the before/after numbers.
 
@@ -340,6 +390,8 @@ See the Decision note under Feature Overview.
 - [ ] §1 investigation produces a documented failure breakdown and API
       choice
 - [ ] Third tier implemented, tested, and wired into `Resolve`
-- [ ] Measured failure rate on the 488-ISBN sample drops from ~15%
+- [ ] Measured failure rate on the ~~488-ISBN~~ 490-row / 477-unique sample
+      drops from ~~~15%~~ 15.5% (74/477) — met by §0's fixes alone, at
+      21/477 = 4.4%, without a third tier
 - [ ] No regression in resolution speed/behavior for ISBNs the first two
       tiers already handle
