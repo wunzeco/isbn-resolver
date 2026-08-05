@@ -11,11 +11,17 @@ ISBNs rather than guessing.
 
 **Measurement update (2026-08-05, final):** the §0 prerequisites have all
 shipped and the official in-code re-measurement has been run. The true
-dual-API-miss rate is **21/477 unique ISBNs ≈ 4.4%**, not ~15% — the
+dual-API-miss rate is **21/475 unique valid ISBNs ≈ 4.4%**, not ~15% — the
 originally-reported gap was overwhelmingly Google Books quota exhaustion, not
 missing catalog data. Every count below predating "Re-measurement (2026-08-05,
 official)" in §1 is a superseded historical figure, retained to show how the
 number moved.
+
+**Re-run (2026-08-06):** the 2026-08-05 run's residual list was never
+recorded, so it was re-derived from a fresh `--no-cache` run, which found
+**22/475 ≈ 4.6%** and lists every ISBN individually — see §1 "Residual
+unresolvable ISBNs". The one-ISBN difference is live-catalog drift between two
+runs a day apart and changes no decision; the 22 are the auditable set.
 
 **Sample size audit (2026-08-06, canonical).** Every ISBN count in this
 document has been re-checked against `examples/ISBNs.csv` itself. These are
@@ -27,14 +33,22 @@ the canonical figures and the only ones that should be quoted going forward:
 | Header rows | 1 (`ISBN`) | first line; skipped by `scanISBNs` |
 | ISBN rows | **490** | pinned by `TestGetISBNsOnTheMeasurementSample` (`cmd/isbn-resolver/main_test.go`) |
 | Unique ISBNs | **477** | 13 duplicate rows across 12 ISBNs, one of which appears three times |
-| Genuinely unresolvable, post-§0 | **21** (4.4% of 477) | §1 "Re-measurement (2026-08-05, official)" |
+| Invalid ISBNs (bad ISBN-13 checksum) | **2** | `9781782955129` (line 210), `9780141371284` (line 343); rejected by `isbn.Validate` before any request |
+| ISBN rows reaching the resolver | **488** | 490 rows − the 2 invalid; `Processing 488 valid ISBN(s)` in `--verbose` |
+| Unique *valid* ISBNs | **475** | 477 unique − the 2 invalid; this is the denominator a resolution rate is actually measured over |
+| Genuinely unresolvable, post-§0 | **22** (4.6% of 475) | §1 "Residual unresolvable ISBNs (2026-08-06)" — listed individually there |
 
 `wc -l` reports 490 for this file — CRLF endings with no trailing newline mean
 the final line goes uncounted — which is where the 489 figure came from, and
 the header row was counted as an ISBN on top of that, which is where 488 and
 the inflated failure numerators came from. **Every appearance of 488, 489,
-475, 76/488, 15.6% or ~15% below is superseded.** (15.5% is *not* superseded:
-it is the corrected pre-fix rate, 74/477.) They are annotated in place
+76/488, 15.6% or ~15% below is superseded.** (15.5% is *not* superseded:
+it is the corrected pre-fix rate, 74/477.) **475 is not superseded either** —
+the 2026-08-06 audit called it a slip for 477, and that correction was itself
+wrong: 475 is the count of unique *valid* ISBNs, the only denominator the
+resolver ever sees, and it is the more honest one to quote a miss rate against
+since the 2 invalid ISBNs are a data-entry problem rather than a catalog gap.
+Figures are annotated in place
 rather than rewritten, because only the pre-fix run can say what the pre-fix
 run measured — the record of how the number moved is worth more than a
 document that reads as though it were always right.
@@ -166,9 +180,12 @@ same 21 residual ISBNs, same 53 recovered by Google Books:**
   resolve** and 5 confirm no data. Final tally: **53 of 74 (71.6%) actually
   have Google Books data** — the API key, not the limiter, was the fix that
   mattered. **21 of 74 (28.4%) are genuinely absent from both APIs.**
-- **True dual-API-miss rate: ~~21/488 ≈ 4.3%~~ ~~21/475~~ → 21/477 unique ≈ 4.4%**
-  (the numerator held throughout; only the denominator moved, and the 475
-  written here was itself a slip for the audited 477), not the original
+- **True dual-API-miss rate: ~~21/488 ≈ 4.3%~~ → 21/475 unique valid ≈ 4.4%**
+  (the numerator held throughout; only the denominator moved. The 2026-08-06
+  audit annotated the 475 here as a slip for 477 — **that annotation was
+  wrong and has been withdrawn**: 475 is 477 unique minus the 2 ISBNs with a
+  bad checksum, i.e. the ISBNs the resolver actually attempted, which is the
+  right denominator for a miss rate), not the original
   ~~76/488 (15.6%)~~ 74/477 (15.5%). Adding the API key alone — no third API
   tier — recovers the large majority of the originally-reported gap.
 - The remaining 21 genuine misses show a rough pattern: five sequential
@@ -257,9 +274,72 @@ row excluded by the `scanISBNs` fix):
   both descriptions. The per-ISBN list of the 21 was never written down, so
   no stronger claim than that is checkable; the clusters are genuine catalog
   gaps, but *which* clusters is only as precise as the prose above.
+  *(Settled 2026-08-06 by a fresh re-run — see "Residual unresolvable ISBNs"
+  below. The recovery of the `979-8` ISBN and of 18 of the 19
+  `978-0-85231-6xxx` ISBNs is confirmed; the `978-5` pair is confirmed to
+  survive.)*
 - **Go/no-go for §2:** left to the plan's separate "Categorise the
   genuinely-unresolvable ISBNs and decide LC vs ISBNdb" item — this item's
   scope is the measurement itself, not the resulting API decision.
+
+#### Residual unresolvable ISBNs (2026-08-06) — the list, at last
+
+The 2026-08-05 re-measurement recorded only the *count* (21) and a prose
+sketch of the prefix clusters. The per-ISBN list was never written down, which
+is why several claims above ("several `978-0-241`/`978-0-746`", whether the
+`979-8` and `978-0-85231-6xxx` clusters survived) were left uncheckable, and
+why the §2 no-go rested on evidence nobody could re-inspect.
+
+**The original list is unrecoverable — `~/.isbn-resolver/cache.json` holds the
+*pre-fix* 74, not the post-fix 21** (the official run used `--no-cache`, which
+neither reads nor writes the cache, so the file still contains the earlier
+unpaced/keyless run: 476 entries, 74 `error`, all stamped 2026-08-05T06:52Z).
+So the list below comes from a **fresh re-run**, not from the 2026-08-05 run:
+
+```
+go build -o /tmp/isbn-resolver ./cmd/isbn-resolver
+ISBN_GOOGLE_BOOKS_API_KEY=<key> /tmp/isbn-resolver \
+  --no-cache --verbose --format json --file examples/ISBNs.csv
+```
+
+488 valid rows processed in 2m36s; **22 unique ISBNs unresolvable**, every one
+of them reporting `Open Library: no data found for ISBN; Google Books: no data
+found for ISBN` — no 429s, no transient failures, no network errors in the
+residual set. (Six `rate limited by Google Books` warnings fired during the
+run, all on ISBNs that then resolved on retry, so none contaminate this list.)
+
+| Cluster | Count | ISBNs |
+|---|---|---|
+| `978-0-241` (Penguin) | 4 | 9780241316016, 9780241426968, 9780241620328, 9780241692295 |
+| `978-1-801042-0xx` (sequential block) | 5 | 9781801042055, 9781801042062, 9781801042079, 9781801042093, 9781801042109 |
+| `978-0-746` (Usborne) | 3 | 9780746091203, 9780746091227, 9780746091326 |
+| `978-5` (Russian-language imprint) | 2 | 9785960464659, 9785960466813 |
+| Singletons | 8 | 9780709724223, 9780852316283, 9781406394986, 9781408347843, 9781838167639, 9781839134494, 9781848531840, 9781917067294 |
+
+**22, not 21.** The two runs are a day apart against live third-party
+catalogs, and the original 21 was never listed, so the one-ISBN delta cannot
+be attributed to a specific ISBN — it is equally consistent with a title
+being de-indexed, with one of the 8 transient-503 probes in the out-of-band
+run having been scored optimistically, or with ordinary catalog churn. It
+does not change any decision: 22/475 is 4.6%, still the same order as 4.4%.
+
+This list also settles the cluster questions the prose could not:
+
+- The `979-8` ISBN (`9798885870337`) and **18 of 19** `978-0-85231-6xxx`
+  ISBNs were recovered by the API key — only `9780852316283` remains. The
+  pre-fix cache holds 19 failures in that block, not the "thirteen" recorded
+  above; 19 is the figure to trust, since it is read from the run's own
+  cache file rather than from a description of it.
+- The `978-5` pair survived intact, as the prose claimed.
+- "Several `978-0-241`/`978-0-746`" is now 4 and 3.
+- The sequential block is confirmed as `978-1-801042-0xx`
+  (9781801042055–9781801042109), not the `978-0-1801042-0xx` written above,
+  and all five members of it in the sample fail.
+
+Nothing here reopens the §2 no-go: the residual is still small, still spread
+across mainstream publishers rather than concentrated in the older/US-
+catalogued works Library of Congress would cover, and still not a case either
+candidate API would obviously fix.
 
 - Run the resolver's existing `--verbose` output (or a small one-off script
   reusing `pkg/resolver`) against the full ~~488~~ 490-row sample and capture the
