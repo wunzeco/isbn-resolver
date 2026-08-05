@@ -25,6 +25,8 @@ type BookMetadata struct {
 const (
 	defaultOpenLibraryBaseURL = "https://openlibrary.org"
 	defaultGoogleBooksBaseURL = "https://www.googleapis.com/books/v1"
+	defaultBaseBackoff        = 500 * time.Millisecond
+	defaultMaxRetries         = 3
 )
 
 // APIClient handles API requests to book metadata services
@@ -33,6 +35,18 @@ type APIClient struct {
 	timeout            time.Duration
 	OpenLibraryBaseURL string
 	GoogleBooksBaseURL string
+
+	// MaxRetries is how many additional attempts a 429/503 response earns
+	// before falling through to the next API/fallback.
+	MaxRetries int
+	// BaseBackoff is the first backoff interval; subsequent attempts grow
+	// exponentially from it (base * 2^attempt), before jitter is added.
+	BaseBackoff time.Duration
+
+	// sleep and jitter are overridable in tests so retry tests don't
+	// actually wait out real backoff delays.
+	sleep  func(time.Duration)
+	jitter func(base time.Duration) time.Duration
 }
 
 // NewAPIClient creates a new API client
@@ -44,6 +58,10 @@ func NewAPIClient(timeout time.Duration) *APIClient {
 		timeout:            timeout,
 		OpenLibraryBaseURL: defaultOpenLibraryBaseURL,
 		GoogleBooksBaseURL: defaultGoogleBooksBaseURL,
+		MaxRetries:         defaultMaxRetries,
+		BaseBackoff:        defaultBaseBackoff,
+		sleep:              time.Sleep,
+		jitter:             defaultJitter,
 	}
 }
 
@@ -68,7 +86,9 @@ func (c *APIClient) Resolve(isbn string) (*BookMetadata, error) {
 func (c *APIClient) fetchFromOpenLibrary(isbn string) (*BookMetadata, error) {
 	apiURL := fmt.Sprintf("%s/api/books?bibkeys=ISBN:%s&format=json&jscmd=data", c.OpenLibraryBaseURL, isbn)
 
-	resp, err := c.httpClient.Get(apiURL)
+	resp, err := c.doWithRetry(func() (*http.Response, error) {
+		return c.httpClient.Get(apiURL)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +168,9 @@ func (c *APIClient) fetchFromOpenLibrary(isbn string) (*BookMetadata, error) {
 func (c *APIClient) fetchFromGoogleBooks(isbn string) (*BookMetadata, error) {
 	apiURL := fmt.Sprintf("%s/volumes?q=isbn:%s", c.GoogleBooksBaseURL, url.QueryEscape(isbn))
 
-	resp, err := c.httpClient.Get(apiURL)
+	resp, err := c.doWithRetry(func() (*http.Response, error) {
+		return c.httpClient.Get(apiURL)
+	})
 	if err != nil {
 		return nil, err
 	}

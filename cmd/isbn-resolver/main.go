@@ -90,6 +90,8 @@ func main() {
 
 	// Create API client
 	client := resolver.NewAPIClient(time.Duration(cfg.Timeout))
+	client.MaxRetries = cfg.RateLimit.MaxRetries
+	client.BaseBackoff = time.Duration(cfg.RateLimit.BaseBackoff)
 
 	progress := io.Discard
 	if cfg.Verbose {
