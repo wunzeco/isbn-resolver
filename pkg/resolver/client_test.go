@@ -132,6 +132,131 @@ func TestResolveFailsWhenBothAPIsHaveNoData(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when neither API has data, got nil")
 	}
+	// A dual "no data" answer is the one failure shape that is genuinely the
+	// tool's answer rather than an environmental accident, so it has to stay
+	// recognisable through the aggregate error.
+	if !errors.Is(err, ErrNoData) {
+		t.Errorf("error = %v, want it to wrap ErrNoData", err)
+	}
+}
+
+// TestResolveErrorNamesEachAPIFailure is the core of reporting *why* an ISBN
+// failed. A 429 from Google Books means its quota is spent and the ISBN may
+// well be resolvable later; a 404 from Open Library means that catalog has
+// nothing. The old flat "failed to resolve ISBN from all APIs" collapsed both
+// into one string — in output and, worse, in the persisted cache file — which
+// is what made the 76/488 sample measurement impossible to interpret
+// (specs/third-fallback-api.md §0).
+func TestResolveErrorNamesEachAPIFailure(t *testing.T) {
+	openLibrary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer openLibrary.Close()
+
+	googleBooks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer googleBooks.Close()
+
+	client := NewAPIClient(5 * time.Second)
+	client.OpenLibraryBaseURL = openLibrary.URL
+	client.GoogleBooksBaseURL = googleBooks.URL
+	// 429 is retryable; without this the test would sit out real backoff.
+	client.MaxRetries = 0
+
+	_, err := client.Resolve("9780134190440")
+	if err == nil {
+		t.Fatal("expected an error when both APIs fail, got nil")
+	}
+
+	msg := err.Error()
+	for _, want := range []string{APIOpenLibrary, "404", APIGoogleBooks, "429"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want it to mention %q", msg, want)
+		}
+	}
+
+	var resolveErr *ResolveError
+	if !errors.As(err, &resolveErr) {
+		t.Fatalf("error = %T, want *ResolveError", err)
+	}
+	if resolveErr.ISBN != "9780134190440" {
+		t.Errorf("ResolveError.ISBN = %q, want %q", resolveErr.ISBN, "9780134190440")
+	}
+
+	// Structured status codes, not just prose: the next step is categorising
+	// several hundred failures, and regexing message text to do it would be
+	// fragile in exactly the place accuracy matters.
+	wantStatus := map[string]int{APIOpenLibrary: 404, APIGoogleBooks: 429}
+	if len(resolveErr.Failures) != len(wantStatus) {
+		t.Fatalf("Failures = %v, want one per API tier", resolveErr.Failures)
+	}
+	for _, f := range resolveErr.Failures {
+		var statusErr *StatusError
+		if !errors.As(f.Err, &statusErr) {
+			t.Errorf("%s failure = %T (%v), want *StatusError", f.API, f.Err, f.Err)
+			continue
+		}
+		if statusErr.StatusCode != wantStatus[f.API] {
+			t.Errorf("%s status = %d, want %d", f.API, statusErr.StatusCode, wantStatus[f.API])
+		}
+	}
+}
+
+// TestResolveErrorDoesNotLeakAPIKey extends the redaction guarantee to the
+// aggregate error. Resolve's error is what main writes into the cache file and
+// prints on the failure line, so it — not just the Google Books error it wraps
+// — is the string a user is most likely to paste into a bug report.
+func TestResolveErrorDoesNotLeakAPIKey(t *testing.T) {
+	const apiKey = "super-secret-key"
+
+	openLibrary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{})
+	}))
+	defer openLibrary.Close()
+
+	// A closed server forces the *url.Error path, whose message embeds the
+	// full request URL — key included.
+	googleBooks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := googleBooks.URL
+	googleBooks.Close()
+
+	client := NewAPIClient(5 * time.Second)
+	client.OpenLibraryBaseURL = openLibrary.URL
+	client.GoogleBooksBaseURL = closedURL
+	client.GoogleBooksAPIKey = apiKey
+
+	_, err := client.Resolve("9780134190440")
+	if err == nil {
+		t.Fatal("expected an error when Google Books is unreachable, got nil")
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Errorf("Resolve error leaked the API key: %v", err)
+	}
+	if !strings.Contains(err.Error(), redactedAPIKey) {
+		t.Errorf("error = %q, want it to name the redaction placeholder %q", err, redactedAPIKey)
+	}
+}
+
+// TestRedactAPIKeyPreservesErrorsWithoutTheKey pins the type-preserving half of
+// redaction. A *StatusError carries no URL and so no key; flattening it into a
+// bare errors.New would silently cost ResolveError the ability to tell a 429
+// from a 404 whenever a key happens to be configured — the exact distinction
+// the key exists to expose.
+func TestRedactAPIKeyPreservesErrorsWithoutTheKey(t *testing.T) {
+	client := NewAPIClient(5 * time.Second)
+	client.GoogleBooksAPIKey = "super-secret-key"
+
+	original := &StatusError{StatusCode: http.StatusTooManyRequests}
+
+	var statusErr *StatusError
+	if got := client.redactAPIKey(original); !errors.As(got, &statusErr) {
+		t.Fatalf("redactAPIKey(%v) = %T, want the *StatusError preserved", original, got)
+	}
+	if statusErr.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusTooManyRequests)
+	}
 }
 
 // googleBooksVolumeResponse is the minimal well-formed volumes payload the key

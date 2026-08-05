@@ -43,6 +43,84 @@ const (
 	APIGoogleBooks = "Google Books"
 )
 
+// ErrNoData is returned by a fetchFrom* method when the upstream answered
+// normally but holds no record for the ISBN — a genuine catalog gap, as
+// opposed to a transport, quota or parse failure. It is a sentinel so callers
+// can tell those apart with errors.Is rather than by matching message text.
+var ErrNoData = errors.New("no data found for ISBN")
+
+// StatusError reports a non-200 response from an upstream API.
+//
+// It carries the code as a field rather than only in its message because "429,
+// the shared anonymous quota is spent" and "404, this catalog has never heard
+// of the book" mean opposite things — one is environmental and retryable, the
+// other is the real signal — yet both read as "failed" once flattened into a
+// string. Conflating them is what made the original 76/488 failure measurement
+// uninterpretable (specs/third-fallback-api.md §0).
+type StatusError struct {
+	StatusCode int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("API returned status %d", e.StatusCode)
+}
+
+// APIFailure is one upstream's reason for not producing metadata.
+type APIFailure struct {
+	// API is the upstream that failed (APIOpenLibrary or APIGoogleBooks).
+	API string
+	// Err is that upstream's own error, already redacted where the tier
+	// sends a credential.
+	Err error
+}
+
+// ResolveError reports that no tier produced metadata, naming each tier and
+// the reason it gave.
+//
+// The flat "failed to resolve ISBN from all APIs" this replaced was written
+// verbatim into the cache file, so a run's failures were permanently
+// indistinguishable from one another: a quota-exhausted 429 and a book neither
+// catalog carries looked identical on disk and in output.
+type ResolveError struct {
+	// ISBN is the ISBN that could not be resolved.
+	ISBN string
+	// Failures holds one entry per tier tried, in the order they were tried.
+	Failures []APIFailure
+}
+
+func (e *ResolveError) Error() string {
+	parts := make([]string, 0, len(e.Failures))
+	for _, f := range e.Failures {
+		parts = append(parts, fmt.Sprintf("%s: %v", f.API, f.Err))
+	}
+
+	return fmt.Sprintf("failed to resolve ISBN from all APIs (%s)", strings.Join(parts, "; "))
+}
+
+// Unwrap exposes the per-tier errors so errors.Is(err, ErrNoData) and
+// errors.As(err, &statusErr) reach through the aggregate. Every error stored
+// here has already passed through redactAPIKey, so nothing unredacted can
+// resurface this way.
+func (e *ResolveError) Unwrap() []error {
+	errs := make([]error, 0, len(e.Failures))
+	for _, f := range e.Failures {
+		errs = append(errs, f.Err)
+	}
+
+	return errs
+}
+
+// add records why one tier did not produce metadata. A nil err means the tier
+// returned neither metadata nor an error — no current tier does that, but
+// recording it explicitly beats printing a bare "<nil>" if one ever starts.
+func (e *ResolveError) add(api string, err error) {
+	if err == nil {
+		err = errors.New("returned no metadata and no error")
+	}
+
+	e.Failures = append(e.Failures, APIFailure{API: api, Err: err})
+}
+
 // RetryNotice describes a retry that is about to happen: the upstream
 // returned a retryable status and the client is about to sleep Delay before
 // re-issuing the request. It carries everything the verbose progress line
@@ -130,21 +208,26 @@ func NewAPIClient(timeout time.Duration) *APIClient {
 	}
 }
 
-// Resolve fetches book metadata for an ISBN
+// Resolve fetches book metadata for an ISBN, trying each API tier in turn and
+// returning a *ResolveError naming every tier's reason when none succeeds.
 func (c *APIClient) Resolve(isbn string) (*BookMetadata, error) {
+	resolveErr := &ResolveError{ISBN: isbn}
+
 	// Try Open Library API first
 	metadata, err := c.fetchFromOpenLibrary(isbn)
 	if err == nil && metadata != nil {
 		return metadata, nil
 	}
+	resolveErr.add(APIOpenLibrary, err)
 
 	// Fallback to Google Books API
 	metadata, err = c.fetchFromGoogleBooks(isbn)
 	if err == nil && metadata != nil {
 		return metadata, nil
 	}
+	resolveErr.add(APIGoogleBooks, err)
 
-	return nil, fmt.Errorf("failed to resolve ISBN from all APIs")
+	return nil, resolveErr
 }
 
 // fetchFromOpenLibrary fetches book data from Open Library API
@@ -160,7 +243,7 @@ func (c *APIClient) fetchFromOpenLibrary(isbn string) (*BookMetadata, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+		return nil, &StatusError{StatusCode: resp.StatusCode}
 	}
 
 	var result map[string]interface{}
@@ -171,7 +254,7 @@ func (c *APIClient) fetchFromOpenLibrary(isbn string) (*BookMetadata, error) {
 	key := "ISBN:" + isbn
 	bookData, ok := result[key].(map[string]interface{})
 	if !ok || bookData == nil {
-		return nil, fmt.Errorf("no data found for ISBN")
+		return nil, ErrNoData
 	}
 
 	metadata := &BookMetadata{
@@ -258,23 +341,33 @@ func (c *APIClient) googleBooksURL(isbn string) string {
 
 // redactAPIKey rewrites err's message with the Google Books key masked out.
 //
-// The wrapping chain is deliberately dropped rather than preserved: errors.Is
-// and errors.As are unused on this path, and re-wrapping the original would let
-// the unredacted message resurface through Unwrap — which is precisely the leak
-// this is here to close. Errors reach stderr via the verbose progress line and
-// are persisted verbatim into the cache file, so a leak here is durable.
+// When a redaction actually fires, the wrapping chain is deliberately dropped
+// rather than preserved: re-wrapping the original would let the unredacted
+// message resurface through Unwrap — precisely the leak this is here to close.
+// Errors reach stderr via the verbose progress line and are persisted verbatim
+// into the cache file, so a leak here is durable.
+//
+// An error whose message never carried the key is returned untouched, keeping
+// its type: that is how a *StatusError survives to tell a 429 from a 404 in
+// ResolveError. Flattening those would cost the distinction for no benefit,
+// since there was nothing in them to hide.
 func (c *APIClient) redactAPIKey(err error) error {
 	if err == nil || c.GoogleBooksAPIKey == "" {
 		return err
 	}
 
 	msg := err.Error()
+	original := msg
 	// The escaped form is what actually appears in the URL; the raw form is
 	// what a caller-supplied message would carry. They are identical for a
 	// typical Google key, so replacing both costs nothing and covers keys
 	// with characters QueryEscape rewrites.
 	for _, form := range []string{url.QueryEscape(c.GoogleBooksAPIKey), c.GoogleBooksAPIKey} {
 		msg = strings.ReplaceAll(msg, form, redactedAPIKey)
+	}
+
+	if msg == original {
+		return err
 	}
 
 	return errors.New(msg)
@@ -292,7 +385,7 @@ func (c *APIClient) fetchGoogleBooksVolume(isbn string) (*BookMetadata, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+		return nil, &StatusError{StatusCode: resp.StatusCode}
 	}
 
 	var result struct {
@@ -319,7 +412,7 @@ func (c *APIClient) fetchGoogleBooksVolume(isbn string) (*BookMetadata, error) {
 	}
 
 	if result.TotalItems == 0 {
-		return nil, fmt.Errorf("no data found for ISBN")
+		return nil, ErrNoData
 	}
 
 	volumeInfo := result.Items[0].VolumeInfo
