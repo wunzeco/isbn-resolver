@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -811,5 +813,202 @@ func TestLoadFromFileGoogleBooksAPIKey(t *testing.T) {
 	}
 	if err := anon.Validate(); err != nil {
 		t.Errorf("Validate() rejected a config with no API key: %v", err)
+	}
+}
+
+// exampleConfig describes one shipped file in examples/ together with the ways
+// it is *entitled* to differ from DefaultConfig(). Everything not declared here
+// is asserted to be at its default, so the declaration doubles as the file's
+// documentation.
+type exampleConfig struct {
+	// path is relative to this package directory.
+	path string
+	// deviations applies every difference the example is meant to have. A
+	// difference not applied here is a drift.
+	deviations func(*Config)
+	// omitted lists the JSON keys the example deliberately does not show, in
+	// the flattened "rate_limit.burst" form. Every other key on Config must
+	// appear in the file, so adding a field to Config fails this test until
+	// someone decides whether the examples should show it.
+	omitted []string
+}
+
+// configJSONKeys returns every JSON key on Config, flattening nested objects
+// into "parent.child" form. Derived by reflection rather than listed, so a new
+// field cannot be added to Config without this test noticing it.
+func configJSONKeys(t *testing.T, typ reflect.Type) []string {
+	t.Helper()
+
+	var keys []string
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			t.Fatalf("field %s has no usable json tag", field.Name)
+		}
+
+		// Only struct fields that are *not* their own JSON scalar recurse.
+		// Duration is a named integer type with custom marshalling, so it is
+		// a leaf despite not being a plain builtin.
+		if field.Type.Kind() == reflect.Struct {
+			for _, nested := range configJSONKeys(t, field.Type) {
+				keys = append(keys, name+"."+nested)
+			}
+			continue
+		}
+		keys = append(keys, name)
+	}
+	return keys
+}
+
+// fileJSONKeys returns the keys actually present in a config file, in the same
+// flattened form as configJSONKeys.
+func fileJSONKeys(t *testing.T, path string) []string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Failed to read %s: %v", path, err)
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		t.Fatalf("Failed to parse %s: %v", path, err)
+	}
+
+	var keys []string
+	for key, raw := range top {
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &nested); err == nil {
+			for inner := range nested {
+				keys = append(keys, key+"."+inner)
+			}
+			continue
+		}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// The example configs are hand-maintained copies of settings whose real
+// defaults live in this package, and they have drifted twice — `sheet_cache`
+// and then `requests_per_second`/`burst` shipped without either example
+// gaining the key, each time caught only by a human reading both files side by
+// side. This test makes the drift mechanical.
+//
+// It guards two distinct failure modes, which need two distinct checks:
+//
+//   - A *missing* key. LoadFromFile unmarshals over DefaultConfig, so an
+//     absent key silently loads at its default and no value comparison can
+//     see it. Only the raw JSON keys can, hence fileJSONKeys.
+//   - A *stale* value. A Default* constant changing without the examples
+//     following leaves them advertising a number the tool no longer uses.
+//     A whole-struct comparison catches that, including for keys nobody
+//     thought to enumerate.
+func TestExampleConfigsMatchDefaults(t *testing.T) {
+	examples := []exampleConfig{
+		{
+			path: "../../examples/config.json",
+			deviations: func(c *Config) {
+				// The example shows a machine-readable format because
+				// that is the interesting choice to demonstrate; the
+				// default is text.
+				c.Format = output.FormatJSON
+			},
+			omitted: []string{
+				// Flag-only plumbing: naming a config file inside a
+				// config file, or an input file that varies per run,
+				// would be actively misleading.
+				"input_file", "config_file",
+				// This is the no-Sheets example.
+				"sheets_url", "sheets_id", "sheets_range",
+				"sheets_credentials", "sheets_output_range",
+				"sheets_create_tab", "sheets_dry_run",
+				// A one-run escape hatch, not a setting to persist.
+				"no_cache",
+				// Deliberately absent: an example config is copied
+				// verbatim, and a credential in a copied file is how a
+				// real key ends up committed. README steers to
+				// ISBN_GOOGLE_BOOKS_API_KEY instead.
+				"google_books_api_key",
+			},
+		},
+		{
+			path: "../../examples/config-with-sheets.json",
+			deviations: func(c *Config) {
+				c.Format = output.FormatJSON
+				// A Sheets run is long and unattended, so the example
+				// turns on progress output.
+				c.Verbose = true
+				c.SheetsURL = "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
+				c.SheetsRange = "Sheet1!A2:A"
+				c.SheetsOutputRange = "Sheet1!B2:J"
+				c.SheetsCredentials = "/path/to/credentials.json"
+				// The sheet cache is off by default but is exactly the
+				// feature a Sheets user wants shown.
+				c.SheetCache = true
+			},
+			omitted: []string{
+				"input_file", "config_file",
+				// Superseded by sheets_url, which is the friendlier of
+				// the two ways to name a spreadsheet.
+				"sheets_id",
+				"sheets_create_tab", "sheets_dry_run",
+				"no_cache",
+				"google_books_api_key",
+			},
+		},
+	}
+
+	for _, example := range examples {
+		t.Run(filepath.Base(example.path), func(t *testing.T) {
+			cfg, err := LoadFromFile(example.path)
+			if err != nil {
+				t.Fatalf("LoadFromFile(%s) failed: %v", example.path, err)
+			}
+
+			// An example that cannot pass Validate is worse than no
+			// example: it is copied first and diagnosed second.
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() rejected %s: %v", example.path, err)
+			}
+
+			want := DefaultConfig()
+			example.deviations(want)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Errorf("%s loaded as\n\t%+v\nwant\n\t%+v", example.path, cfg, want)
+			}
+
+			present := make(map[string]bool)
+			for _, key := range fileJSONKeys(t, example.path) {
+				present[key] = true
+			}
+			omitted := make(map[string]bool)
+			for _, key := range example.omitted {
+				omitted[key] = true
+			}
+
+			known := make(map[string]bool)
+			for _, key := range configJSONKeys(t, reflect.TypeOf(Config{})) {
+				known[key] = true
+				switch {
+				case present[key] && omitted[key]:
+					t.Errorf("%q is listed as deliberately omitted but is present in %s",
+						key, example.path)
+				case !present[key] && !omitted[key]:
+					t.Errorf("%q is missing from %s: add it, or declare it in omitted with a reason",
+						key, example.path)
+				}
+			}
+
+			// A key the struct does not know about parses fine and then
+			// does nothing, which is the quietest possible way for an
+			// example to lie about a setting.
+			for key := range present {
+				if !known[key] {
+					t.Errorf("%s sets %q, which is not a Config field", example.path, key)
+				}
+			}
+		})
 	}
 }
