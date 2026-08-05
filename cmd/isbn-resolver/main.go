@@ -69,10 +69,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cfg.Verbose {
-		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s)...\n", len(validISBNs))
-	}
-
 	// Load the cache before any network work. A corrupt cache file is fatal
 	// rather than a warning: starting from empty would silently re-resolve
 	// everything and then overwrite the file the user still has a chance to
@@ -87,6 +83,11 @@ func main() {
 		bookCache = loaded
 	}
 
+	if cfg.Verbose {
+		fmt.Fprintf(os.Stderr, "Loaded cache: %d entries (%s)\n", bookCache.Len(), cfg.CacheFile)
+		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s)...\n", len(validISBNs))
+	}
+
 	// Create API client
 	client := resolver.NewAPIClient(time.Duration(cfg.Timeout))
 
@@ -96,7 +97,13 @@ func main() {
 	}
 
 	// Process ISBNs sequentially — the worker pool lands separately.
-	results, errors := resolveISBNs(validISBNs, client, bookCache, cache.NewPolicy(bookCache, cacheMode), progress)
+	policy := cache.NewPolicy(bookCache, cacheMode)
+	results, errors := resolveISBNs(validISBNs, client, bookCache, policy, progress)
+
+	if cfg.Verbose {
+		counters := policy.Counters()
+		fmt.Fprintf(os.Stderr, "Cache: %d hit, %d miss, %d retried\n", counters.Hits, counters.Misses, counters.Retried)
+	}
 
 	// Write through before producing any output, so the cache is up to date
 	// even on the Google Sheets path (which returns early) and so a failure to
