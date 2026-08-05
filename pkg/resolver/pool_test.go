@@ -36,10 +36,10 @@ func TestResolvePreservesOrderUnderShuffledLatency(t *testing.T) {
 		isbns[i] = fmt.Sprintf("isbn-%02d", i)
 	}
 
-	resolve := func(isbn string) (*BookMetadata, error) {
+	resolve := func(isbn string) (*BookMetadata, string, error) {
 		// Deliberately scramble completion order across workers.
 		time.Sleep(scrambleDelay(isbn))
-		return &BookMetadata{ISBN: isbn, Title: "Title for " + isbn}, nil
+		return &BookMetadata{ISBN: isbn, Title: "Title for " + isbn}, APIOpenLibrary, nil
 	}
 
 	results := Resolve(8, isbns, resolve)
@@ -71,7 +71,7 @@ func TestResolveBoundsConcurrency(t *testing.T) {
 	}
 
 	var inFlight, maxInFlight int64
-	resolve := func(isbn string) (*BookMetadata, error) {
+	resolve := func(isbn string) (*BookMetadata, string, error) {
 		cur := atomic.AddInt64(&inFlight, 1)
 		for {
 			max := atomic.LoadInt64(&maxInFlight)
@@ -81,7 +81,7 @@ func TestResolveBoundsConcurrency(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 		atomic.AddInt64(&inFlight, -1)
-		return &BookMetadata{ISBN: isbn}, nil
+		return &BookMetadata{ISBN: isbn}, APIOpenLibrary, nil
 	}
 
 	Resolve(concurrency, isbns, resolve)
@@ -98,11 +98,11 @@ func TestResolveBoundsConcurrency(t *testing.T) {
 // Result without disrupting the rest of the batch.
 func TestResolvePropagatesErrors(t *testing.T) {
 	isbns := []string{"good-1", "bad", "good-2"}
-	resolve := func(isbn string) (*BookMetadata, error) {
+	resolve := func(isbn string) (*BookMetadata, string, error) {
 		if isbn == "bad" {
-			return nil, fmt.Errorf("upstream said no")
+			return nil, "", fmt.Errorf("upstream said no")
 		}
-		return &BookMetadata{ISBN: isbn}, nil
+		return &BookMetadata{ISBN: isbn}, APIGoogleBooks, nil
 	}
 
 	results := Resolve(2, isbns, resolve)
@@ -119,8 +119,8 @@ func TestResolvePropagatesErrors(t *testing.T) {
 // would otherwise deadlock or panic: no input, and a concurrency value below
 // 1 (e.g. an unvalidated config's zero-value default).
 func TestResolveHandlesDegenerateConcurrency(t *testing.T) {
-	resolve := func(isbn string) (*BookMetadata, error) {
-		return &BookMetadata{ISBN: isbn}, nil
+	resolve := func(isbn string) (*BookMetadata, string, error) {
+		return &BookMetadata{ISBN: isbn}, APIOpenLibrary, nil
 	}
 
 	if got := Resolve(4, nil, resolve); len(got) != 0 {

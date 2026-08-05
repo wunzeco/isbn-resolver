@@ -299,13 +299,13 @@ type countingResolver struct {
 	titles map[string]string
 }
 
-func (r *countingResolver) Resolve(isbnStr string) (*resolver.BookMetadata, error) {
+func (r *countingResolver) Resolve(isbnStr string) (*resolver.BookMetadata, string, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, isbnStr)
 	r.mu.Unlock()
 
 	if r.fail[isbnStr] {
-		return nil, fmt.Errorf("upstream said no")
+		return nil, "", fmt.Errorf("upstream said no")
 	}
 
 	title := r.titles[isbnStr]
@@ -313,7 +313,7 @@ func (r *countingResolver) Resolve(isbnStr string) (*resolver.BookMetadata, erro
 		title = "Title for " + isbnStr
 	}
 
-	return &resolver.BookMetadata{Title: title, Authors: []string{"An Author"}}, nil
+	return &resolver.BookMetadata{Title: title, Authors: []string{"An Author"}}, resolver.APIOpenLibrary, nil
 }
 
 // runOnce mimics one invocation of the tool over isbns: load the cache file,

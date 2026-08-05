@@ -138,6 +138,71 @@ func TestIntegrationConcurrentMatchesSequential(t *testing.T) {
 	}
 }
 
+// TestIntegrationResolvedLineNamesTheAnsweringTier proves the fallback chain is
+// observable from --verbose output: two ISBNs resolve identically as far as the
+// metadata is concerned, but one was carried by Open Library and the other only
+// by the Google Books fallback, and the progress line has to say which.
+//
+// This is what makes a re-measurement run interpretable
+// (specs/third-fallback-api.md §4) — without it, "the second tier is earning
+// its keep" is not a claim the output can support.
+func TestIntegrationResolvedLineNamesTheAnsweringTier(t *testing.T) {
+	const (
+		openLibraryISBN = "9780134190440"
+		googleBooksISBN = "9780132350884"
+	)
+
+	openLibrary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isbnStr := strings.TrimPrefix(r.URL.Query().Get("bibkeys"), "ISBN:")
+		w.Header().Set("Content-Type", "application/json")
+		if isbnStr != openLibraryISBN {
+			// An empty body is Open Library's "no record", which is what
+			// drives the fallback to the next tier.
+			json.NewEncoder(w).Encode(map[string]interface{}{})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ISBN:" + isbnStr: map[string]interface{}{"title": "Open Library Book"},
+		})
+	}))
+	defer openLibrary.Close()
+
+	googleBooks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"totalItems": 1,
+			"items": []map[string]interface{}{
+				{"volumeInfo": map[string]interface{}{"title": "Google Books Book"}},
+			},
+		})
+	}))
+	defer googleBooks.Close()
+
+	client := resolver.NewAPIClient(5 * time.Second)
+	client.OpenLibraryBaseURL = openLibrary.URL
+	client.GoogleBooksBaseURL = googleBooks.URL
+
+	var progress strings.Builder
+	store := cache.New()
+	policy := cache.NewPolicy(store, cache.ModeNoCache)
+
+	// Concurrency 1 keeps the two lines in input order so each can be matched
+	// whole, rather than asserting on two independently-ordered substrings.
+	if _, failures := resolveISBNs(1, []string{openLibraryISBN, googleBooksISBN}, client, store, policy, &progress); len(failures) != 0 {
+		t.Fatalf("run reported failures: %v", failures)
+	}
+
+	got := progress.String()
+	for _, want := range []string{
+		"✓ Resolved ISBN " + openLibraryISBN + ": Open Library Book (via Open Library)\n",
+		"✓ Resolved ISBN " + googleBooksISBN + ": Google Books Book (via Google Books)\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("progress output = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
 // TestIntegrationRateLimitWarningReachesProgressOutput closes the loop the
 // unit tests only cover in halves: a real 429 over HTTP, through the real
 // retry loop, through the pool, out to the same progress writer --verbose

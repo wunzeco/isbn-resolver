@@ -355,7 +355,7 @@ func resolveCacheMode(cfg *config.Config) (cache.Mode, error) {
 // of the cache is the calls it does *not* make, which is only observable from
 // the resolver's side.
 type bookResolver interface {
-	Resolve(isbn string) (*resolver.BookMetadata, error)
+	Resolve(isbn string) (metadata *resolver.BookMetadata, source string, err error)
 }
 
 // newAPIClient builds the single APIClient the whole run shares, including the
@@ -501,10 +501,24 @@ func resolveISBNs(concurrency int, isbns []string, client bookResolver, store *c
 			metadata.ISBN = m.isbn
 			results[m.index] = metadata
 		}
-		fmt.Fprintf(progress, "✓ Resolved ISBN %s: %s\n", group[0].isbn, res.Metadata.Title)
+		fmt.Fprintf(progress, "✓ Resolved ISBN %s: %s%s\n", group[0].isbn, res.Metadata.Title, viaSource(res.Source))
 	}
 
 	return results, failures
+}
+
+// viaSource renders the " (via <API>)" suffix that names which tier answered.
+//
+// An unnamed source yields no suffix at all rather than "(via )": the resolver
+// only leaves it empty when it returns an error, but a fake or a future tier
+// that forgets to name itself should degrade to the pre-existing line rather
+// than print a hole where an API name belongs.
+func viaSource(source string) string {
+	if source == "" {
+		return ""
+	}
+
+	return " (via " + source + ")"
 }
 
 // cachedMetadata rebuilds an output row from a cached entry. The ISBN is reset

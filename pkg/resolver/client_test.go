@@ -43,7 +43,7 @@ func TestResolveOpenLibrarySuccess(t *testing.T) {
 	client.OpenLibraryBaseURL = openLibrary.URL
 	client.GoogleBooksBaseURL = googleBooks.URL
 
-	metadata, err := client.Resolve("9780134190440")
+	metadata, source, err := client.Resolve("9780134190440")
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
@@ -58,6 +58,9 @@ func TestResolveOpenLibrarySuccess(t *testing.T) {
 	}
 	if len(metadata.Authors) != 2 {
 		t.Errorf("Authors = %v, want 2 authors", metadata.Authors)
+	}
+	if source != APIOpenLibrary {
+		t.Errorf("source = %q, want %q", source, APIOpenLibrary)
 	}
 }
 
@@ -96,7 +99,7 @@ func TestResolveFallsBackToGoogleBooks(t *testing.T) {
 	client.OpenLibraryBaseURL = openLibrary.URL
 	client.GoogleBooksBaseURL = googleBooks.URL
 
-	metadata, err := client.Resolve("9780134190440")
+	metadata, source, err := client.Resolve("9780134190440")
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
@@ -108,6 +111,12 @@ func TestResolveFallsBackToGoogleBooks(t *testing.T) {
 	}
 	if metadata.ISBN13 != "9780134190440" {
 		t.Errorf("ISBN13 = %q, want %q", metadata.ISBN13, "9780134190440")
+	}
+	// The point of the source: this ISBN resolved only because the second tier
+	// answered after Open Library came up empty, and nothing in the metadata
+	// itself says so.
+	if source != APIGoogleBooks {
+		t.Errorf("source = %q, want %q", source, APIGoogleBooks)
 	}
 }
 
@@ -128,9 +137,12 @@ func TestResolveFailsWhenBothAPIsHaveNoData(t *testing.T) {
 	client.OpenLibraryBaseURL = openLibrary.URL
 	client.GoogleBooksBaseURL = googleBooks.URL
 
-	_, err := client.Resolve("0000000000")
+	_, source, err := client.Resolve("0000000000")
 	if err == nil {
 		t.Fatal("expected an error when neither API has data, got nil")
+	}
+	if source != "" {
+		t.Errorf("source = %q, want empty when no tier answered", source)
 	}
 	// A dual "no data" answer is the one failure shape that is genuinely the
 	// tool's answer rather than an environmental accident, so it has to stay
@@ -164,7 +176,7 @@ func TestResolveErrorNamesEachAPIFailure(t *testing.T) {
 	// 429 is retryable; without this the test would sit out real backoff.
 	client.MaxRetries = 0
 
-	_, err := client.Resolve("9780134190440")
+	_, _, err := client.Resolve("9780134190440")
 	if err == nil {
 		t.Fatal("expected an error when both APIs fail, got nil")
 	}
@@ -227,7 +239,7 @@ func TestResolveErrorDoesNotLeakAPIKey(t *testing.T) {
 	client.GoogleBooksBaseURL = closedURL
 	client.GoogleBooksAPIKey = apiKey
 
-	_, err := client.Resolve("9780134190440")
+	_, _, err := client.Resolve("9780134190440")
 	if err == nil {
 		t.Fatal("expected an error when Google Books is unreachable, got nil")
 	}

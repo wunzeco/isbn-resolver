@@ -2,10 +2,10 @@ package resolver
 
 import "sync"
 
-// ResolveFunc resolves a single ISBN into metadata or an error. Both
-// APIClient.Resolve and test fakes satisfy it, so Resolve below never needs
-// to know about APIClient directly.
-type ResolveFunc func(isbn string) (*BookMetadata, error)
+// ResolveFunc resolves a single ISBN into metadata, the name of the API that
+// supplied it, and an error. Both APIClient.Resolve and test fakes satisfy it,
+// so Resolve below never needs to know about APIClient directly.
+type ResolveFunc func(isbn string) (metadata *BookMetadata, source string, err error)
 
 // Result is one job's outcome, carrying the index of the input it answers so
 // the caller can drop it back into the right output slot.
@@ -13,7 +13,12 @@ type Result struct {
 	Index    int
 	ISBN     string
 	Metadata *BookMetadata
-	Err      error
+	// Source names the API tier that answered, empty when none did. It rides
+	// on the Result rather than on BookMetadata because it describes this
+	// resolution, not the book — the same book resolved tomorrow may well come
+	// from a different tier.
+	Source string
+	Err    error
 }
 
 // Resolve runs resolve over isbns across up to concurrency workers and
@@ -44,8 +49,8 @@ func Resolve(concurrency int, isbns []string, resolve ResolveFunc) []Result {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				metadata, err := resolve(isbns[i])
-				results[i] = Result{Index: i, ISBN: isbns[i], Metadata: metadata, Err: err}
+				metadata, source, err := resolve(isbns[i])
+				results[i] = Result{Index: i, ISBN: isbns[i], Metadata: metadata, Source: source, Err: err}
 			}
 		}()
 	}

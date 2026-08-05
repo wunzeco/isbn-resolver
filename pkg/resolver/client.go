@@ -210,24 +210,31 @@ func NewAPIClient(timeout time.Duration) *APIClient {
 
 // Resolve fetches book metadata for an ISBN, trying each API tier in turn and
 // returning a *ResolveError naming every tier's reason when none succeeds.
-func (c *APIClient) Resolve(isbn string) (*BookMetadata, error) {
+//
+// The second return value names the tier that answered (APIOpenLibrary or
+// APIGoogleBooks), and is empty when none did. Without it the fallback chain is
+// invisible from the outside: two ISBNs that both "resolved" say nothing about
+// whether the second tier is earning its keep, which is exactly the question
+// specs/third-fallback-api.md §1's measurement has to answer before a third
+// tier is worth building.
+func (c *APIClient) Resolve(isbn string) (*BookMetadata, string, error) {
 	resolveErr := &ResolveError{ISBN: isbn}
 
 	// Try Open Library API first
 	metadata, err := c.fetchFromOpenLibrary(isbn)
 	if err == nil && metadata != nil {
-		return metadata, nil
+		return metadata, APIOpenLibrary, nil
 	}
 	resolveErr.add(APIOpenLibrary, err)
 
 	// Fallback to Google Books API
 	metadata, err = c.fetchFromGoogleBooks(isbn)
 	if err == nil && metadata != nil {
-		return metadata, nil
+		return metadata, APIGoogleBooks, nil
 	}
 	resolveErr.add(APIGoogleBooks, err)
 
-	return nil, resolveErr
+	return nil, "", resolveErr
 }
 
 // fetchFromOpenLibrary fetches book data from Open Library API
