@@ -1,5 +1,13 @@
 {
   "timeout": "30s",
   "format": "json",
-  "verbose": false
+  "verbose": false,
+  "cache_file": "~/.isbn-resolver/cache.json",
+  "concurrency": 5,
+  "resolve_all": false,
+  "retry_failed": false,
+  "rate_limit": {
+    "max_retries": 3,
+    "base_backoff": "500ms"
+  }
 }

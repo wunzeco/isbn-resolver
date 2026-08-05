@@ -168,6 +168,44 @@ isbn-resolver --sheets-url "URL" \
 
 See [GOOGLE_SHEETS.md](GOOGLE_SHEETS.md) for detailed setup instructions.
 
+## Caching & Performance
+
+Repeated runs skip ISBNs that have already been resolved, and cache misses
+are resolved concurrently under a bounded worker pool with rate-limit
+backoff.
+
+```bash
+# Normal run: cache hits are skipped, only new ISBNs are resolved
+isbn-resolver --sheets-url "URL" --sheets-range "A2:A" --cache-file ~/.isbn-resolver/cache.json
+
+# Force re-resolution of every ISBN, refreshing the cache
+isbn-resolver --sheets-url "URL" --sheets-range "A2:A" --resolve-all
+
+# Re-attempt only previously-failed ISBNs
+isbn-resolver --sheets-url "URL" --sheets-range "A2:A" --retry-failed
+
+# Increase worker concurrency for a large first-time run
+isbn-resolver --file isbns.txt --concurrency 10 --resolve-all
+
+# Ad hoc run that shouldn't touch the cache
+isbn-resolver 978-0134190440 --no-cache
+```
+
+- The cache is a JSON file (default `~/.isbn-resolver/cache.json`) keyed by
+  normalized ISBN (ISBN-13 preferred), storing resolved metadata, status,
+  error message, and last-attempt timestamp. Writes are atomic (temp file +
+  rename) so a killed process can't corrupt it.
+- On a normal run, cached successes *and* errors are reused without a
+  network call. `--retry-failed` reuses successes but re-attempts cached
+  errors. `--resolve-all` and `--no-cache` always hit the network;
+  `--no-cache` additionally skips reading/writing the cache file.
+  `--resolve-all` and `--retry-failed` are mutually exclusive.
+- Cache misses are resolved across `--concurrency` workers (default 5) under
+  a shared token-bucket rate limiter. HTTP 429/503 responses are retried
+  with exponential backoff and jitter, honoring `Retry-After` when present.
+- `--verbose` prints a cache breakdown (`Cache: 812 hit, 40 miss, 6 retried`)
+  alongside the usual per-ISBN progress output.
+
 ## Configuration
 
 ### Command-Line Flags
@@ -186,6 +224,11 @@ See [GOOGLE_SHEETS.md](GOOGLE_SHEETS.md) for detailed setup instructions.
 | `--sheets-output-range` | Where to write results | - |
 | `--sheets-create-tab` | Create new tab for results | - |
 | `--sheets-dry-run` | Preview without writing | false |
+| `--cache-file` | Resolution cache file path | `~/.isbn-resolver/cache.json` |
+| `--concurrency` | Number of concurrent resolution workers | 5 |
+| `--resolve-all` | Ignore cached entries and re-resolve every ISBN | false |
+| `--retry-failed` | Reuse cached successes but re-attempt cached failures | false |
+| `--no-cache` | Bypass the cache entirely for this run | false |
 
 ### Environment Variables
 
@@ -194,6 +237,8 @@ See [GOOGLE_SHEETS.md](GOOGLE_SHEETS.md) for detailed setup instructions.
 | `ISBN_TIMEOUT` | API request timeout |
 | `ISBN_FORMAT` | Output format |
 | `ISBN_VERBOSE` | Enable verbose mode (true/false) |
+| `ISBN_CACHE_FILE` | Resolution cache file path |
+| `ISBN_CONCURRENCY` | Number of concurrent resolution workers |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON |
 | `GOOGLE_SHEETS_CREDENTIALS` | Alternative credentials path |
 
@@ -205,7 +250,15 @@ Create a JSON configuration file:
 {
   "timeout": "30s",
   "format": "json",
-  "verbose": false
+  "verbose": false,
+  "cache_file": "~/.isbn-resolver/cache.json",
+  "concurrency": 5,
+  "resolve_all": false,
+  "retry_failed": false,
+  "rate_limit": {
+    "max_retries": 3,
+    "base_backoff": "500ms"
+  }
 }
 ```
 

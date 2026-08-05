@@ -5,5 +5,13 @@
   "sheets_url": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
   "sheets_range": "Sheet1!A2:A",
   "sheets_output_range": "Sheet1!B2:J",
-  "sheets_credentials": "/path/to/credentials.json"
+  "sheets_credentials": "/path/to/credentials.json",
+  "cache_file": "~/.isbn-resolver/cache.json",
+  "concurrency": 5,
+  "resolve_all": false,
+  "retry_failed": false,
+  "rate_limit": {
+    "max_retries": 3,
+    "base_backoff": "500ms"
+  }
 }
