@@ -331,6 +331,12 @@ Use it with:
 isbn-resolver --config config.json --file isbns.txt
 ```
 
+A `google_books_api_key` key is also accepted, but is deliberately absent from
+the examples above and from `examples/config.json`: a config file is copied
+verbatim and then usually committed, which is the wrong place for a
+credential. Prefer `ISBN_GOOGLE_BOOKS_API_KEY` (see
+[Google Books API key](#google-books-api-key-optional)).
+
 ## Project Structure
 
 ```
