@@ -2,8 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/wunzeco/isbn-resolver/pkg/cache"
 	"github.com/wunzeco/isbn-resolver/pkg/config"
 	"github.com/wunzeco/isbn-resolver/pkg/output"
+	"github.com/wunzeco/isbn-resolver/pkg/resolver"
 )
 
 // parseArgs runs the real flag registration against a throwaway FlagSet so the
@@ -201,6 +205,230 @@ func TestEveryFlagHasAnOverride(t *testing.T) {
 			t.Errorf("flag --%s has no entry in cliFlags.apply, so it would be discarded when --config is used", f.Name)
 		}
 	})
+}
+
+// countingResolver stands in for the API client and records which ISBNs it was
+// asked to resolve. The value of the cache is the calls it prevents, and a call
+// that never happens is only observable here.
+type countingResolver struct {
+	calls  []string
+	fail   map[string]bool
+	titles map[string]string
+}
+
+func (r *countingResolver) Resolve(isbnStr string) (*resolver.BookMetadata, error) {
+	r.calls = append(r.calls, isbnStr)
+
+	if r.fail[isbnStr] {
+		return nil, fmt.Errorf("upstream said no")
+	}
+
+	title := r.titles[isbnStr]
+	if title == "" {
+		title = "Title for " + isbnStr
+	}
+
+	return &resolver.BookMetadata{Title: title, Authors: []string{"An Author"}}, nil
+}
+
+// runOnce mimics one invocation of the tool over isbns: load the cache file,
+// resolve, save it back. Going through the file (rather than reusing the
+// in-memory cache) is the point — it is what makes the second call a genuine
+// second run rather than a continuation of the first.
+func runOnce(t *testing.T, path string, mode cache.Mode, client bookResolver, isbns []string) ([]resolver.BookMetadata, map[string]error, cache.Counters) {
+	t.Helper()
+
+	store := cache.New()
+	if mode.Persists() {
+		loaded, err := cache.Load(path)
+		if err != nil {
+			t.Fatalf("loading cache: %v", err)
+		}
+		store = loaded
+	}
+
+	policy := cache.NewPolicy(store, mode)
+	results, failures := resolveISBNs(isbns, client, store, policy, io.Discard)
+
+	if mode.Persists() {
+		if err := store.Save(path); err != nil {
+			t.Fatalf("saving cache: %v", err)
+		}
+	}
+
+	return results, failures, policy.Counters()
+}
+
+// TestResolveISBNsSecondRunMakesNoNetworkCalls is the headline promise of the
+// cache (spec §1 and the "Integration Tests" requirement): rerunning an
+// unchanged list costs nothing and changes nothing.
+func TestResolveISBNsSecondRunMakesNoNetworkCalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	// A mix of spellings so the ISBN-10 input is keyed by its ISBN-13 form and
+	// still round-trips to the same output row.
+	isbns := []string{"9780134190440", "0596520689", "9780132350884"}
+
+	client := &countingResolver{fail: map[string]bool{"0596520689": true}}
+
+	first, firstErrs, firstCounters := runOnce(t, path, cache.ModeNormal, client, isbns)
+	if len(client.calls) != len(isbns) {
+		t.Fatalf("cold run made %d calls, want %d", len(client.calls), len(isbns))
+	}
+	if firstCounters.Misses != len(isbns) {
+		t.Errorf("cold run counters = %+v, want %d misses", firstCounters, len(isbns))
+	}
+
+	client.calls = nil
+	second, secondErrs, secondCounters := runOnce(t, path, cache.ModeNormal, client, isbns)
+
+	if len(client.calls) != 0 {
+		t.Errorf("warm run made %d calls (%v), want 0", len(client.calls), client.calls)
+	}
+	if secondCounters.Hits != len(isbns) {
+		t.Errorf("warm run counters = %+v, want %d hits", secondCounters, len(isbns))
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Errorf("warm run results differ from cold run:\n cold: %+v\n warm: %+v", first, second)
+	}
+
+	// Failures must replay as failures, otherwise a cached error would surface
+	// as an empty successful row on every subsequent run.
+	if len(secondErrs) != len(firstErrs) {
+		t.Fatalf("warm run errors = %v, want same keys as cold run %v", secondErrs, firstErrs)
+	}
+	for isbnStr, err := range firstErrs {
+		got, ok := secondErrs[isbnStr]
+		if !ok {
+			t.Errorf("warm run lost the cached failure for %s", isbnStr)
+			continue
+		}
+		if got.Error() != err.Error() {
+			t.Errorf("warm run error for %s = %q, want %q", isbnStr, got, err)
+		}
+	}
+}
+
+// TestResolveISBNsModes checks that the loop actually honours the resolved
+// cache.Mode. The policy owns the decision, but the loop owns whether the
+// decision is consulted at all — this is the assertion that catches a loop that
+// silently ignores it.
+func TestResolveISBNsModes(t *testing.T) {
+	isbns := []string{"9780134190440", "9780132350884"}
+	failing := "9780132350884"
+
+	tests := []struct {
+		name      string
+		mode      cache.Mode
+		wantCalls []string
+	}{
+		{
+			name:      "normal reuses successes and failures",
+			mode:      cache.ModeNormal,
+			wantCalls: nil,
+		},
+		{
+			name:      "resolve-all ignores a warm cache",
+			mode:      cache.ModeResolveAll,
+			wantCalls: isbns,
+		},
+		{
+			name:      "retry-failed re-attempts only the cached failure",
+			mode:      cache.ModeRetryFailed,
+			wantCalls: []string{failing},
+		},
+		{
+			name:      "no-cache resolves everything without reading the file",
+			mode:      cache.ModeNoCache,
+			wantCalls: isbns,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cache.json")
+			client := &countingResolver{fail: map[string]bool{failing: true}}
+
+			runOnce(t, path, cache.ModeNormal, client, isbns)
+			client.calls = nil
+
+			runOnce(t, path, tt.mode, client, isbns)
+
+			if !reflect.DeepEqual(client.calls, tt.wantCalls) {
+				t.Errorf("calls = %v, want %v", client.calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+// TestResolveISBNsNoCacheLeavesFileUntouched pins the write half of --no-cache:
+// an ad hoc run must not pollute an existing cache, which is the whole reason
+// the flag exists (spec §2).
+func TestResolveISBNsNoCacheLeavesFileUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	client := &countingResolver{}
+
+	runOnce(t, path, cache.ModeNormal, client, []string{"9780134190440"})
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading cache file: %v", err)
+	}
+
+	runOnce(t, path, cache.ModeNoCache, client, []string{"9780132350884"})
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading cache file: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("--no-cache modified the cache file:\n before: %s\n after: %s", before, after)
+	}
+}
+
+// TestResolveISBNsCachesUnderTheISBN13Key guards the read-through against the
+// keying rule in cache.Key: an ISBN-10 resolved on one run must be a hit when
+// the same book arrives as an ISBN-13 on the next, and the output row must
+// carry the spelling the caller supplied rather than the cache key.
+func TestResolveISBNsCachesUnderTheISBN13Key(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	client := &countingResolver{}
+
+	runOnce(t, path, cache.ModeNormal, client, []string{"0134190440"})
+	client.calls = nil
+
+	results, _, counters := runOnce(t, path, cache.ModeNormal, client, []string{"9780134190440"})
+
+	if len(client.calls) != 0 {
+		t.Errorf("ISBN-13 spelling made %d calls, want 0 (should hit the ISBN-10 entry)", len(client.calls))
+	}
+	if counters.Hits != 1 {
+		t.Errorf("counters = %+v, want 1 hit", counters)
+	}
+	if results[0].ISBN != "9780134190440" {
+		t.Errorf("result ISBN = %q, want the spelling this run supplied", results[0].ISBN)
+	}
+}
+
+// TestResolveISBNsRepeatedInputResolvesOnce covers the reason results are
+// recorded during the loop rather than after it: a list containing the same
+// ISBN twice should still cost one network call.
+func TestResolveISBNsRepeatedInputResolvesOnce(t *testing.T) {
+	client := &countingResolver{}
+	store := cache.New()
+
+	results, _, _ := func() ([]resolver.BookMetadata, map[string]error, cache.Counters) {
+		policy := cache.NewPolicy(store, cache.ModeNormal)
+		r, f := resolveISBNs([]string{"9780134190440", "9780134190440"}, client, store, policy, io.Discard)
+		return r, f, policy.Counters()
+	}()
+
+	if len(client.calls) != 1 {
+		t.Errorf("calls = %v, want a single call for the duplicated ISBN", client.calls)
+	}
+	if !reflect.DeepEqual(results[0], results[1]) {
+		// The second row can only match if it came from the cached first.
+		t.Errorf("duplicate rows differ: %+v vs %+v", results[0], results[1])
+	}
 }
 
 func assertDuration(t *testing.T, name string, got config.Duration, want time.Duration) {
