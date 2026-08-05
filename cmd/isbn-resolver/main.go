@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wunzeco/isbn-resolver/pkg/cache"
@@ -105,13 +106,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s) with %d worker(s)...\n", len(validISBNs), cfg.Concurrency)
 	}
 
-	// Create API client
-	client := newAPIClient(cfg)
-
 	progress := io.Discard
 	if cfg.Verbose {
 		progress = os.Stderr
 	}
+
+	// Create API client
+	client := newAPIClient(cfg)
+	client.OnRetry = retryWarner(progress)
 
 	policy := cache.NewPolicy(bookCache, cacheMode)
 	results, errors := resolveISBNs(cfg.Concurrency, validISBNs, client, bookCache, policy, progress)
@@ -366,6 +368,31 @@ func newAPIClient(cfg *config.Config) *resolver.APIClient {
 	client.Limiter = resolver.NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst)
 
 	return client
+}
+
+// retryWarner returns an APIClient.OnRetry callback that prints the spec's
+// rate-limit progress line to w:
+//
+//	Warning: rate limited by Open Library, retrying ISBN 9780596520687 in 2.1s (attempt 1/3)
+//
+// The line exists so a run that has gone quiet is distinguishable from a run
+// that is sleeping off a backoff — without it, a 429 storm looks like a hang.
+//
+// Every pool worker shares one APIClient and so calls this concurrently; the
+// mutex keeps two simultaneous retries from interleaving mid-line on stderr,
+// which io.Writer gives no guarantee about on its own.
+//
+// The delay is rounded to a tenth of a second because the exact jittered
+// nanoseconds are noise to a reader, and an un-rounded Duration prints as
+// "2.100371842s".
+func retryWarner(w io.Writer) func(resolver.RetryNotice) {
+	var mu sync.Mutex
+	return func(n resolver.RetryNotice) {
+		mu.Lock()
+		defer mu.Unlock()
+		fmt.Fprintf(w, "Warning: rate limited by %s, retrying ISBN %s in %s (attempt %d/%d)\n",
+			n.API, n.ISBN, n.Delay.Round(100*time.Millisecond), n.Attempt, n.MaxRetries)
+	}
 }
 
 // resolveISBNs resolves each ISBN, consulting the cache first, then resolving

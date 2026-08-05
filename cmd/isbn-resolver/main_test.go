@@ -741,3 +741,65 @@ func TestNewAPIClientLimiterPacesConcurrentResolution(t *testing.T) {
 			requests, rate, elapsed, min)
 	}
 }
+
+// TestRetryWarnerFormatsSpecLine pins the exact message shape from
+// specs/performance-caching.md §"Expected Output (Verbose Mode)". The line is
+// the only cue that a stalled-looking run is actually sleeping off a backoff,
+// so its content — which API, which ISBN, how long, which attempt — is the
+// feature, not incidental formatting.
+func TestRetryWarnerFormatsSpecLine(t *testing.T) {
+	var buf strings.Builder
+	warn := retryWarner(&buf)
+
+	warn(resolver.RetryNotice{
+		API:        resolver.APIOpenLibrary,
+		ISBN:       "9780596520687",
+		StatusCode: http.StatusTooManyRequests,
+		Attempt:    1,
+		MaxRetries: 3,
+		// Jittered backoff: rounded to a tenth for display.
+		Delay: 2100371842 * time.Nanosecond,
+	})
+
+	want := "Warning: rate limited by Open Library, retrying ISBN 9780596520687 in 2.1s (attempt 1/3)\n"
+	if got := buf.String(); got != want {
+		t.Errorf("retryWarner() wrote %q, want %q", got, want)
+	}
+}
+
+// TestRetryWarnerIsConcurrencySafe exercises the callback the way the pool
+// does — from many goroutines at once against one shared APIClient. Under
+// -race this catches an unguarded writer, and the line-count assertion
+// catches interleaved partial writes that a race detector alone would miss.
+func TestRetryWarnerIsConcurrencySafe(t *testing.T) {
+	var buf strings.Builder
+	warn := retryWarner(&buf)
+
+	const workers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			warn(resolver.RetryNotice{
+				API:        resolver.APIGoogleBooks,
+				ISBN:       "9780134190440",
+				Attempt:    1,
+				MaxRetries: 3,
+				Delay:      time.Second,
+			})
+		}()
+	}
+	wg.Wait()
+
+	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	if len(lines) != workers {
+		t.Fatalf("got %d lines, want %d — lines were interleaved or lost", len(lines), workers)
+	}
+	want := "Warning: rate limited by Google Books, retrying ISBN 9780134190440 in 1s (attempt 1/3)"
+	for i, line := range lines {
+		if line != want {
+			t.Errorf("line[%d] = %q, want %q", i, line, want)
+		}
+	}
+}

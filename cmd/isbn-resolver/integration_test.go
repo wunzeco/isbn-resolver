@@ -137,3 +137,60 @@ func TestIntegrationConcurrentMatchesSequential(t *testing.T) {
 		t.Errorf("concurrent results differ from sequential:\n sequential: %+v\n concurrent: %+v", sequential, concurrent)
 	}
 }
+
+// TestIntegrationRateLimitWarningReachesProgressOutput closes the loop the
+// unit tests only cover in halves: a real 429 over HTTP, through the real
+// retry loop, through the pool, out to the same progress writer --verbose
+// points at stderr. It is what proves the callback is actually wired rather
+// than merely correct in isolation.
+func TestIntegrationRateLimitWarningReachesProgressOutput(t *testing.T) {
+	var attempts int64
+	openLibrary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isbnStr := strings.TrimPrefix(r.URL.Query().Get("bibkeys"), "ISBN:")
+		// Rate limit the first attempt only, so the run still succeeds and
+		// the warning is the sole difference from a clean run.
+		if atomic.AddInt64(&attempts, 1) == 1 {
+			// Retry-After: 0 keeps the test instant — the client's sleep
+			// stub is unexported and out of reach from package main, so the
+			// backoff here is real time.
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ISBN:" + isbnStr: map[string]interface{}{"title": "Title for " + isbnStr},
+		})
+	}))
+	defer openLibrary.Close()
+
+	client := resolver.NewAPIClient(5 * time.Second)
+	client.OpenLibraryBaseURL = openLibrary.URL
+
+	var progress strings.Builder
+	client.OnRetry = retryWarner(&progress)
+
+	store := cache.New()
+	policy := cache.NewPolicy(store, cache.ModeNoCache)
+	results, failures := resolveISBNs(1, []string{"9780596520687"}, client, store, policy, &progress)
+
+	if len(failures) != 0 {
+		t.Fatalf("run reported failures: %v", failures)
+	}
+	if results[0].Title == "" {
+		t.Fatal("ISBN did not resolve after the retry")
+	}
+
+	// The exact delay rendering is pinned by TestRetryWarnerFormatsSpecLine;
+	// what matters here is that a real 429 produces the line at all, naming
+	// the API, the ISBN, and the attempt.
+	got := progress.String()
+	for _, want := range []string{
+		"Warning: rate limited by Open Library, retrying ISBN 9780596520687 in ",
+		"(attempt 1/3)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("progress output = %q, want it to contain %q", got, want)
+		}
+	}
+}
