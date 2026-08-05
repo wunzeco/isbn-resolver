@@ -42,10 +42,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cfg.Verbose {
-		fmt.Fprintf(os.Stderr, "Cache mode: %s\n", cacheMode)
-	}
-
 	// Get ISBNs from various sources
 	isbns, err := getISBNs(cfg)
 	if err != nil {
@@ -91,8 +87,15 @@ func main() {
 		bookCache = loaded
 	}
 
+	// A single coherent cache header, rather than a separate "Cache mode" line
+	// printed before the cache is even loaded: which fields are meaningful
+	// depends on whether the mode persists a cache file at all.
 	if cfg.Verbose {
-		fmt.Fprintf(os.Stderr, "Loaded cache: %d entries (%s)\n", bookCache.Len(), cfg.CacheFile)
+		if cacheMode.Persists() {
+			fmt.Fprintf(os.Stderr, "Loaded cache: %d entries (%s, mode=%s)\n", bookCache.Len(), cfg.CacheFile, cacheMode)
+		} else {
+			fmt.Fprintf(os.Stderr, "Cache disabled (mode=%s)\n", cacheMode)
+		}
 		fmt.Fprintf(os.Stderr, "Processing %d valid ISBN(s) with %d worker(s)...\n", len(validISBNs), cfg.Concurrency)
 	}
 
